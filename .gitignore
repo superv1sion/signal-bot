@@ -47,3 +47,6 @@ coverage/
 # Local binaries / artifacts in repo root
 /tsx
 /trading-bot@*
+
+# Run artifacts (RUN_ARTIFACT_DIR)
+/data/

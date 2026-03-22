@@ -1,7 +1,13 @@
 import 'dotenv/config';
-import { runBot } from './src/bot';
+import { runEvaluation } from './src/pipeline/runEvaluation';
 import { logInfo, logError } from './src/logger';
-import { postSignalToTelegram, startTelegramListener } from './src/telegramClient';
+import { logDecisionRecord, logStructured } from './src/logging/structured';
+import { writeRunArtifact, appendDecisionJsonl } from './src/persistence/runArtifact';
+import { postPipelineToTelegram, startTelegramListener } from './src/telegramClient';
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function main() {
     const rawArgs = process.argv.slice(2);
@@ -16,62 +22,122 @@ async function main() {
         const arg = process.argv.find((a) => a.startsWith(`${name}=`));
         if (!arg) return fallback;
         const v = Number(arg.split('=')[1]);
-        return Number.isFinite(v) && v > 0 ? v : fallback;
-    };
-    const getFlagFloat = (name: string, fallback: number) => {
-        const arg = process.argv.find((a) => a.startsWith(`${name}=`));
-        if (!arg) return fallback;
-        const v = Number(arg.split('=')[1]);
         return Number.isFinite(v) ? v : fallback;
     };
 
+    const once = hasFlag('--once');
     const daemon = hasFlag('--daemon') || (process.env.DAEMON || '').trim() === '1';
     const telegramMode = hasFlag('--telegram') || (process.env.TELEGRAM_MODE || '').trim() === '1';
     const pollMinutes = getFlagNumber('--interval-minutes', Number(process.env.POLL_MINUTES || 5)) || 5;
-    const confidenceThreshold = getFlagFloat('--threshold', Number(process.env.CONF_THRESHOLD || 0)) || 0;
 
-    logInfo(`Starting signal bot`, { symbol, interval, daemon, pollMinutes, confidenceThreshold, telegramMode });
+    const entryThreshold = getFlagNumber(
+        '--entry-threshold',
+        Number(process.env.ENTRY_THRESHOLD ?? 5),
+    );
+    const llmMinScore = getFlagNumber('--llm-min-score', Number(process.env.LLM_MIN_SCORE ?? 3));
+    process.env.ENTRY_THRESHOLD = String(entryThreshold);
+    process.env.LLM_MIN_SCORE = String(llmMinScore);
 
-    const formatNumber = (n: number) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 }).format(n);
+    const highAttentionMinScore = getFlagNumber(
+        '--high-attention-min-score',
+        Number(process.env.HIGH_ATTENTION_MIN_SCORE ?? 4),
+    );
 
-    async function runOnce() {
-        try {
-            const signal = await runBot({ symbol, interval });
-            const readable = {
-                signal: signal.signal,
-                confidence: signal.confidence,
-                reason: signal.reason,
-                takeProfits: signal.takeProfits?.map((p) => formatNumber(p)),
-                stopLoss: formatNumber(signal.stopLoss),
-                entryType: signal.entryType,
-                entryPrice: formatNumber(signal.entryPrice),
-                riskReward: signal.riskReward,
-            };
-            logInfo('Signal (readable)', readable);
-            if (signal.confidence >= confidenceThreshold) {
-                // await postSignalToTelegram({ symbol, interval, signal });
-            } else {
-                logInfo(`Confidence below threshold; skipping Telegram`, { confidence: signal.confidence, threshold: confidenceThreshold });
+    const runArtifactDir = (process.env.RUN_ARTIFACT_DIR || '').trim();
+
+    if (daemon && once) {
+        logError('Cannot use --daemon and --once together', '');
+        process.exit(2);
+    }
+
+    logInfo(`Starting signal bot`, {
+        symbol,
+        interval,
+        once,
+        daemon,
+        pollMinutes,
+        entryThreshold,
+        llmMinScore,
+        telegramMode,
+        runArtifactDir: runArtifactDir || '(stdout only)',
+    });
+
+    async function persistAndNotify(result: Awaited<ReturnType<typeof runEvaluation>>) {
+        logDecisionRecord(result.record);
+        if (runArtifactDir) {
+            try {
+                await writeRunArtifact(runArtifactDir, result.record);
+                await appendDecisionJsonl(runArtifactDir, result.record);
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                logError('Failed to write run artifact', msg);
             }
-        } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            logError('Bot iteration failed', message);
+        }
+        if (result.decision.send && result.proposal) {
+            await postPipelineToTelegram({ symbol, interval, result });
         }
     }
 
+    async function runOnce() {
+        const result = await runEvaluation({ symbol, interval });
+        await persistAndNotify(result);
+        return result;
+    }
+
     if (telegramMode) {
-        await startTelegramListener({ confidenceThreshold });
+        await startTelegramListener();
         return;
-    } else if (daemon) {
-        logInfo('Daemon mode enabled');
-        // Run immediately, then on an interval
+    }
+
+    if (daemon) {
+        logInfo('Daemon mode — dynamic cadence when strategy score is high', {
+            highAttentionMinScore,
+        });
+        const baseMs = pollMinutes * 60 * 1000;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+            try {
+                const result = await runOnce();
+                const nextMs =
+                    result.best.score >= highAttentionMinScore ? 60_000 : baseMs;
+                await sleep(nextMs);
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                logStructured({
+                    level: 'error',
+                    msg: 'daemon_tick_failed',
+                    error: message,
+                });
+                await sleep(60_000);
+            }
+        }
+    }
+
+    try {
         await runOnce();
-        setInterval(() => {
-            runOnce().catch((err) => logError('Scheduled run failed', err instanceof Error ? err.message : String(err)));
-        }, pollMinutes * 60 * 1000);
-    } else {
-        await runOnce();
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logError('Run failed', message);
+        process.exit(1);
     }
 }
+
+process.on('unhandledRejection', (reason) => {
+    logStructured({
+        level: 'error',
+        msg: 'unhandled_rejection',
+        error: String(reason),
+    });
+    process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+    logStructured({
+        level: 'error',
+        msg: 'uncaught_exception',
+        error: err instanceof Error ? err.message : String(err),
+    });
+    process.exit(1);
+});
 
 main();

@@ -1,7 +1,7 @@
 {
   "name": "trading-bot",
   "version": "1.0.0",
-  "description": "CLI crypto trading signal bot using Binance OHLCV, RSI/EMA indicators, and OpenAI analysis.",
+  "description": "Rule-based crypto signal bot: Binance OHLCV, deterministic strategies, optional LLM risk critic.",
   "private": true,
   "type": "module",
   "main": "index.ts",
@@ -9,6 +9,7 @@
     "start": "tsx index.ts",
     "signal": "tsx index.ts",
     "build": "tsc -p tsconfig.json",
+    "backtest": "tsx scripts/backtest.ts",
     "lint": "echo 'no linter configured'"
   },
   "author": "",

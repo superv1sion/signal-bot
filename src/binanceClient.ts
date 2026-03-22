@@ -25,6 +25,7 @@ const client = new MainClient({
 export async function fetchOHLCV(params: { symbol: string; interval: KlinesParams['interval']; limit?: number }): Promise<Candlestick[]> {
     const { symbol, interval, limit = 200 } = params;
     try {
+        console.log('Fetching OHLCV', { symbol, interval, limit });
         const klines: Kline[] = await client.getKlines({ symbol, interval, limit });
         return klines.map((k) => ({
             openTime: k[0],
@@ -36,6 +37,7 @@ export async function fetchOHLCV(params: { symbol: string; interval: KlinesParam
             closeTime: k[6],
         }));
     } catch (error) {
+        console.log(error)
         const message = error instanceof Error ? error.message : 'Unknown error';
         throw new Error(`Failed to fetch klines for ${symbol} ${interval}: ${message}`);
     }

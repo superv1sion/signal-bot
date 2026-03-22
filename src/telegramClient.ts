@@ -1,10 +1,10 @@
 import 'dotenv/config';
 import { logError, logInfo } from './logger';
-import { type SignalResponse } from './openaiClient';
-import { runBot } from './bot';
+import type { PipelineResult, TradeProposal } from './types/pipeline';
+import { runEvaluation } from './pipeline/runEvaluation';
 
-const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '8288693765:AAGBGdq0jQRUwv66Ryjfj7-c4zqF5CNoFk4').trim();
-const TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '-1002987519133').trim();
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
 
 function escapeHtml(text: string): string {
     return text
@@ -54,43 +54,70 @@ export async function sendTelegramMessage(params: {
     }
 }
 
-export function formatSignalAsHtml(input: {
+function formatNumber(n: number) {
+    return new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 }).format(n);
+}
+
+export function formatPipelineResultAsHtml(input: {
     symbol: string;
     interval: string;
-    signal: SignalResponse;
+    result: PipelineResult;
 }): string {
-    const { symbol, interval, signal } = input;
-    const formatNumber = (n: number) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 }).format(n);
-    const confidencePct = Math.round(signal.confidence * 100);
-    const dirLabel = signal.signal === 'buy' ? '🟢 Long' : signal.signal === 'sell' ? '🔴 Short' : '🟡 Hold';
-    const title = `📣 <b>AI Signal</b> — <b>${escapeHtml(symbol)}</b> (${escapeHtml(interval)})`;
-    const direction = `📌 <b>${dirLabel}</b> · 📈 Confidence: <b>${confidencePct}%</b>`;
-    const entryLabel = signal.entryType === 'now' ? '⚡ Entry Now' : '⏳ Limit Entry';
-    const entry = `${entryLabel}: <b>${formatNumber(signal.entryPrice)}</b>`;
-    const rr = signal.riskReward || [];
-    const tps = signal.takeProfits
+    const { symbol, interval, result } = input;
+    const { best, critique, decision, proposal, record } = result;
+    const title = `📣 <b>Signal</b> — <b>${escapeHtml(symbol)}</b> (${escapeHtml(interval)})`;
+    const strat = `📊 <b>Strategy</b>: ${escapeHtml(best.name)} · score <b>${best.score}</b> → <b>${decision.vetoed ? best.score : decision.finalScore}</b>`;
+    const llmLine =
+        critique != null
+            ? `🧪 <b>LLM</b>: adj ${critique.score_adjustment} · ${escapeHtml(critique.comment)}` +
+              (critique.risk_flags.length
+                  ? `\n⚠️ <b>Risks</b>: ${escapeHtml(critique.risk_flags.join(', '))}`
+                  : '')
+            : `🧪 <b>LLM</b>: (skipped — below gate or no API key)`;
+
+    if (!proposal) {
+        return [title, strat, llmLine, `⏸ <b>No trade</b>: ${escapeHtml(record.skipReason || 'n/a')}`].join('\n');
+    }
+
+    const p: TradeProposal = proposal;
+    const dirLabel = p.direction === 'long' ? '🟢 Long' : '🔴 Short';
+    const entryZone = `⚡ Entry: <b>${formatNumber(Math.min(p.entryZone[0], p.entryZone[1]))}</b> – <b>${formatNumber(Math.max(p.entryZone[0], p.entryZone[1]))}</b>`;
+    const tps = p.takeProfits
         .map((tp, i) => {
-            const rrPart = rr[i] !== undefined ? ` (RR ${formatNumber(rr[i])})` : '';
+            const rr = p.riskReward[i];
+            const rrPart = rr !== undefined ? ` (RR ${formatNumber(rr)})` : '';
             return `🎯 TP${i + 1}: <b>${formatNumber(tp)}</b>${rrPart}`;
         })
         .join('\n');
-    const sl = `🛑 SL: <b>${formatNumber(signal.stopLoss)}</b>`;
-    const reason = `🧠 <b>Reason</b>: ${escapeHtml(signal.reason)}`;
-    return [title, direction, entry, tps, sl, reason].join('\n');
+    const sl = `🛑 SL: <b>${formatNumber(p.stopLoss)}</b>`;
+    const reason = `📝 <b>Reason</b>: ${escapeHtml(p.reason)}`;
+    return [title, strat, llmLine, dirLabel, entryZone, tps, sl, reason].join('\n');
 }
 
-export async function postSignalToTelegram(input: {
+export function formatPipelineSkipSummary(input: {
     symbol: string;
     interval: string;
-    signal: SignalResponse;
+    result: PipelineResult;
+}): string {
+    const { symbol, interval, result } = input;
+    const r = result.record;
+    return (
+        `ℹ️ <b>${escapeHtml(symbol)}</b> (${escapeHtml(interval)}) — no signal. ` +
+        `Strategy: ${escapeHtml(result.best.name)} score ${result.best.score} → final ${r.finalScore ?? result.best.score}. ` +
+        `${escapeHtml(r.skipReason || '')}`
+    );
+}
+
+export async function postPipelineToTelegram(input: {
+    symbol: string;
+    interval: string;
+    result: PipelineResult;
     chatIdOverride?: string;
 }): Promise<void> {
-    const text = formatSignalAsHtml({ symbol: input.symbol, interval: input.interval, signal: input.signal });
+    const text = formatPipelineResultAsHtml(input);
     await sendTelegramMessage({ chatId: input.chatIdOverride, text, parseMode: 'HTML', disableWebPagePreview: true });
 }
 
-
-// --- Telegram listener mode ---
 type TelegramUpdate = {
     update_id: number;
     message?: {
@@ -106,7 +133,7 @@ type TelegramUpdate = {
 const VALID_INTERVALS = new Set([
     '1m', '3m', '5m', '15m', '30m',
     '1h', '2h', '4h', '6h', '8h', '12h',
-    '1d', '3d', '1w', '1M'
+    '1d', '3d', '1w', '1M',
 ]);
 
 function normalizeSymbol(raw: string): string {
@@ -124,11 +151,10 @@ function normalizeInterval(raw: string): string | null {
 function parseSymbolAndInterval(text?: string): { symbol: string; interval: string } | { error: string } {
     if (!text) return { error: 'Empty message' };
     const trimmed = text.trim();
-    // Accept formats like: "BTCUSDT 15m" or "ETH/USDT 1h"
     const parts = trimmed.split(/\s+/);
     if (parts.length < 2) return { error: 'Please send in format: SYMBOL TIMEFRAME (e.g., BTCUSDT 15m)' };
-    const symbol = normalizeSymbol(parts[0]);
-    const interval = normalizeInterval(parts[1]);
+    const symbol = normalizeSymbol(parts[0]!);
+    const interval = normalizeInterval(parts[1]!);
     if (!symbol || symbol.length < 5) return { error: 'Invalid symbol. Example: BTCUSDT' };
     if (!interval) return { error: 'Invalid timeframe. Examples: 15m, 1h, 4h, 1d' };
     return { symbol, interval };
@@ -141,7 +167,7 @@ async function getUpdates(offset?: number, timeoutSec = 50): Promise<TelegramUpd
             timeout: timeoutSec,
             allowed_updates: ['message', 'edited_message'],
         } as any);
-        return Array.isArray(res) ? res as TelegramUpdate[] : [];
+        return Array.isArray(res) ? (res as TelegramUpdate[]) : [];
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logError('Failed to get updates from Telegram', message);
@@ -153,8 +179,7 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function startTelegramListener(options?: { confidenceThreshold?: number }): Promise<void> {
-    const threshold = options?.confidenceThreshold ?? (Number(process.env.CONF_THRESHOLD || 0) || 0);
+export async function startTelegramListener(): Promise<void> {
     if (!TELEGRAM_BOT_TOKEN) {
         throw new Error('Missing TELEGRAM_BOT_TOKEN');
     }
@@ -180,19 +205,36 @@ export async function startTelegramListener(options?: { confidenceThreshold?: nu
                 }
 
                 const { symbol, interval } = parsed;
-                await sendTelegramMessage({ chatId, text: `⏳ Analyzing <b>${symbol}</b> (${interval})...`, parseMode: 'HTML' });
+                await sendTelegramMessage({
+                    chatId,
+                    text: `⏳ Analyzing <b>${symbol}</b> (${interval})...`,
+                    parseMode: 'HTML',
+                });
                 try {
-                    const signal = await runBot({ symbol, interval });
-                    if (signal.confidence >= threshold) {
-                        await postSignalToTelegram({ symbol, interval, signal, chatIdOverride: chatId });
+                    const result = await runEvaluation({ symbol, interval });
+                    const signaled = Boolean(result.decision.send && result.proposal);
+                    if (signaled) {
+                        await postPipelineToTelegram({
+                            symbol,
+                            interval,
+                            result,
+                            chatIdOverride: chatId,
+                        });
                     } else {
-                        await postSignalToTelegram({ symbol, interval, signal, chatIdOverride: chatId });
-                        await sendTelegramMessage({ chatId, text: `ℹ️ Confidence (${Math.round(signal.confidence * 100)}%) is below threshold (${Math.round(threshold * 100)}%).`, parseMode: 'HTML' });
+                        await sendTelegramMessage({
+                            chatId,
+                            text: formatPipelineSkipSummary({ symbol, interval, result }),
+                            parseMode: 'HTML',
+                        });
                     }
                 } catch (err) {
                     const message = err instanceof Error ? err.message : String(err);
                     logError('Failed to generate signal', message);
-                    await sendTelegramMessage({ chatId, text: `⚠️ Failed to generate signal: <code>${escapeHtml(message)}</code>`, parseMode: 'HTML' });
+                    await sendTelegramMessage({
+                        chatId,
+                        text: `⚠️ Failed: <code>${escapeHtml(message)}</code>`,
+                        parseMode: 'HTML',
+                    });
                 }
             }
         } catch (e) {
@@ -202,5 +244,3 @@ export async function startTelegramListener(options?: { confidenceThreshold?: nu
         }
     }
 }
-
-
