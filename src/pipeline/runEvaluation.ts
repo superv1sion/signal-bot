@@ -11,8 +11,11 @@ import type {
     PipelineResult,
 } from '../types/pipeline';
 import { logError } from '../logger';
+import { readMarketEnvironmentNote } from '../config/readMarketEnvironment';
 
 const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || '').trim();
+
+const OPERATOR_ENV_MAX_RECORD_CHARS = 12_000;
 
 function buildSkipReason(params: {
     signaled: boolean;
@@ -49,6 +52,9 @@ export async function runEvaluation(params: {
     const llmMinScore = Number(process.env.LLM_MIN_SCORE ?? 3);
     const entryThreshold = Number(process.env.ENTRY_THRESHOLD ?? 5);
 
+    const operatorMarketEnvironmentRaw = readMarketEnvironmentNote();
+    const operatorMarketEnvironmentForLlm = operatorMarketEnvironmentRaw.slice(0, 16_000);
+
     let critique = null;
     let llmSkippedReason: LlmSkippedReason | undefined;
     let llmError: string | undefined;
@@ -58,6 +64,9 @@ export async function runEvaluation(params: {
                 market_state: state,
                 signals,
                 strategy: best,
+                ...(operatorMarketEnvironmentForLlm
+                    ? { operator_market_environment: operatorMarketEnvironmentForLlm }
+                    : {}),
             });
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -116,6 +125,14 @@ export async function runEvaluation(params: {
         llmSkippedReason:
             critique != null || llmError ? undefined : llmSkippedReason,
         llmError,
+        ...(operatorMarketEnvironmentRaw
+            ? {
+                operatorMarketEnvironment: operatorMarketEnvironmentRaw.slice(
+                    0,
+                    OPERATOR_ENV_MAX_RECORD_CHARS,
+                ),
+            }
+            : {}),
         llmMinScoreGate: llmMinScore,
         decision: signaled ? 'signal_sent' : 'skipped',
         proposal: proposal ?? undefined,

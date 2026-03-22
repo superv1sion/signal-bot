@@ -3,7 +3,9 @@ import type { Candle } from '../types/pipeline';
 import type { KlinesParams } from 'binance/lib/types/shared';
 
 export function mapToHigherInterval(tf: string): string {
-    const x = tf.toLowerCase();
+    const trimmed = tf.trim();
+    if (trimmed === '1M') return '1M';
+    const x = trimmed.toLowerCase();
     switch (x) {
         case '1m':
             return '5m';
@@ -34,7 +36,10 @@ export function mapToHigherInterval(tf: string): string {
 }
 
 export function mapToLowerInterval(tf: string): string {
-    const x = tf.toLowerCase();
+    const trimmed = tf.trim();
+    // Binance monthly is `1M`; do not lowercase (would collide with 1-minute `1m`).
+    if (trimmed === '1M') return '1w';
+    const x = trimmed.toLowerCase();
     switch (x) {
         case '1m':
             return '1m';
@@ -64,11 +69,32 @@ export function mapToLowerInterval(tf: string): string {
             return '12h';
         case '1w':
             return '1d';
-        case '1M':
-            return '1w';
         default:
             return '5m';
     }
+}
+
+/** Binance kline interval string → candle length in ms (for scheduling). */
+export function intervalToMilliseconds(tf: string): number {
+    const s = tf.trim();
+    if (s === '1M') return 30 * 24 * 60 * 60 * 1000;
+    const lower = s.toLowerCase();
+    const m = /^(\d+)(m|h|d|w)$/.exec(lower);
+    if (!m) return 5 * 60 * 1000;
+    const n = Number(m[1]);
+    const u = m[2];
+    const minuteMs = 60_000;
+    if (u === 'm') return n * minuteMs;
+    if (u === 'h') return n * 60 * minuteMs;
+    if (u === 'd') return n * 24 * 60 * minuteMs;
+    if (u === 'w') return n * 7 * 24 * 60 * minuteMs;
+    return 5 * 60 * 1000;
+}
+
+/** One poll per lower-timeframe candle (same LTF mapping as market data). */
+export function getDaemonPollMillisecondsFromChart(primaryInterval: string): number {
+    const ltf = mapToLowerInterval(primaryInterval);
+    return intervalToMilliseconds(ltf);
 }
 
 export type MarketBundle = {

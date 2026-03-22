@@ -101,6 +101,8 @@ export type DecisionRecord = {
     llmSkippedReason?: LlmSkippedReason;
     /** Set when an LLM request was attempted but failed. */
     llmError?: string;
+    /** Operator-written macro note from `MARKET_ENVIRONMENT.md` (or `MARKET_ENVIRONMENT_FILE`), if any. */
+    operatorMarketEnvironment?: string;
     /** `LLM_MIN_SCORE` gate value used for this run (for audit). */
     llmMinScoreGate?: number;
     decision: DecisionKind;

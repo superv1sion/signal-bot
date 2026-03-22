@@ -16,7 +16,8 @@ Pipeline tuning:
 
 - `ENTRY_THRESHOLD` — minimum final score to send a signal (default `5`)
 - `LLM_MIN_SCORE` — call LLM critic only when best strategy score is at least this (default `3`)
-- `HIGH_ATTENTION_MIN_SCORE` — in `--daemon`, poll every 1 minute when best score ≥ this, else use `POLL_MINUTES` (default `4`)
+- `POLL_MINUTES` — optional; overrides **normal** daemon interval (minutes). If unset, normal cadence = **primary** timeframe (e.g. 15m → 15 min)
+- `HIGH_ATTENTION_MIN_SCORE` — when best strategy score ≥ this, daemon uses **lower timeframe** cadence (e.g. 15m chart → 5 min)
 - `RUN_ARTIFACT_DIR` — if set, writes per-run JSON and appends `decisions.jsonl`
 - `LOG_FORMAT=json` — one JSON object per line for decisions and structured errors
 

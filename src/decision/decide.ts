@@ -30,5 +30,6 @@ export function decide(input: {
         finalScore >= input.entryThreshold &&
         input.best.score > 0 &&
         !input.critique?.veto;
+
     return { finalScore, send, vetoed: false };
 }

@@ -43,7 +43,7 @@ chmod +x scripts/run-signal.sh
 | Mode | How to enable | Behavior |
 |------|----------------|----------|
 | **One-shot** | Default, or `--once` | Run pipeline once, log (and optional Telegram / artifacts), exit. |
-| **Daemon** | `--daemon` or `DAEMON=1` | Repeats forever: base interval `POLL_MINUTES` (default 5 min); switches to **1 minute** when the best strategy score ≥ `HIGH_ATTENTION_MIN_SCORE`. On failure, waits 60s and retries (use **systemd/PM2** outside the process for crash restarts — see [docs/DEPLOY.md](docs/DEPLOY.md)). |
+| **Daemon** | `--daemon` or `DAEMON=1` | **Normal:** sleep = **primary chart** candle (e.g. `15m` → every **15 minutes**). **High attention:** when best strategy score ≥ `HIGH_ATTENTION_MIN_SCORE` (default 4), sleep = **lower timeframe** candle (e.g. `15m` → **5m**). Override normal cadence only with `POLL_MINUTES` or `--interval-minutes=N`. On tick failure, waits up to 60s before retry. Use **systemd/PM2** for crash restarts — see [docs/DEPLOY.md](docs/DEPLOY.md). |
 | **Telegram listener** | `--telegram` or `TELEGRAM_MODE=1` | Long-polls Telegram; users send `SYMBOL TIMEFRAME` (e.g. `BTCUSDT 15m`) and get one reply per request (signal or “no signal” summary). Requires `TELEGRAM_BOT_TOKEN`. |
 
 `--daemon` and `--once` cannot be used together.
@@ -62,10 +62,9 @@ chmod +x scripts/run-signal.sh
 | `--once` | Force single run (for cron). |
 | `--daemon` | Long-running poll loop. |
 | `--telegram` | Telegram listener mode. |
-| `--interval-minutes=N` | Base daemon interval (also `POLL_MINUTES`). |
+| `--interval-minutes=N` | **Optional** fixed daemon interval in minutes (also `POLL_MINUTES`). If omitted and `POLL_MINUTES` is unset, cadence follows the **lower timeframe** of your chart interval. |
 | `--entry-threshold=N` | Min **final** score to send Telegram (also `ENTRY_THRESHOLD`). |
 | `--llm-min-score=N` | Call LLM critic only if best strategy score ≥ N (also `LLM_MIN_SCORE`). |
-| `--high-attention-min-score=N` | In daemon, use 1m cadence when best score ≥ N (also `HIGH_ATTENTION_MIN_SCORE`). |
 
 ## Environment variables
 
@@ -102,8 +101,8 @@ chmod +x scripts/run-signal.sh
 | `TIMEFRAME` | `5m` | Default interval |
 | `ENTRY_THRESHOLD` | `5` | Final score must be ≥ this to notify |
 | `LLM_MIN_SCORE` | `3` | Gate: run LLM only if best strategy score ≥ this |
-| `HIGH_ATTENTION_MIN_SCORE` | `4` | Daemon: faster polling when best score is high |
-| `POLL_MINUTES` | `5` | Daemon base interval |
+| `HIGH_ATTENTION_MIN_SCORE` | `4` | Daemon: when best score ≥ this, poll every **lower timeframe** tick instead of every primary candle |
+| `POLL_MINUTES` | _(unset)_ | If set, **normal** daemon interval in minutes; if **unset**, normal interval = primary chart timeframe (e.g. 15m → 15 min) |
 | `RUN_ARTIFACT_DIR` | _(empty)_ | If set, writes per-run JSON + appends `decisions.jsonl` |
 | `LOG_FORMAT` | _(human)_ | Set to `json` for one JSON object per line (decisions + fatal errors) |
 

@@ -1,11 +1,11 @@
 import type { MarketState, SignalBundle, StrategyResult } from '../types/pipeline';
 import { sfpStrategy } from './sfpReversal';
 import { trendFollowStrategy } from './trendFollow';
-import { addToWinnerStrategy } from './addToWinner';
+import { consolidationRangeStrategy } from './consolidationRange';
 
 const strategies: Array<
     (state: MarketState, signals: SignalBundle) => StrategyResult
-> = [sfpStrategy, trendFollowStrategy, addToWinnerStrategy];
+> = [sfpStrategy, trendFollowStrategy, consolidationRangeStrategy];
 
 export function runStrategies(
     state: MarketState,

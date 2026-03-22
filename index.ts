@@ -1,4 +1,9 @@
 import 'dotenv/config';
+import {
+    getDaemonPollMillisecondsFromChart,
+    intervalToMilliseconds,
+    mapToLowerInterval,
+} from './src/data/marketData';
 import { runEvaluation } from './src/pipeline/runEvaluation';
 import { logInfo, logError } from './src/logger';
 import { logDecisionRecord, logStructured } from './src/logging/structured';
@@ -28,8 +33,6 @@ async function main() {
     const once = hasFlag('--once');
     const daemon = hasFlag('--daemon') || (process.env.DAEMON || '').trim() === '1';
     const telegramMode = hasFlag('--telegram') || (process.env.TELEGRAM_MODE || '').trim() === '1';
-    const pollMinutes = getFlagNumber('--interval-minutes', Number(process.env.POLL_MINUTES || 5)) || 5;
-
     const entryThreshold = getFlagNumber(
         '--entry-threshold',
         Number(process.env.ENTRY_THRESHOLD ?? 5),
@@ -38,12 +41,31 @@ async function main() {
     process.env.ENTRY_THRESHOLD = String(entryThreshold);
     process.env.LLM_MIN_SCORE = String(llmMinScore);
 
+    const runArtifactDir = (process.env.RUN_ARTIFACT_DIR || '').trim();
+
     const highAttentionMinScore = getFlagNumber(
         '--high-attention-min-score',
         Number(process.env.HIGH_ATTENTION_MIN_SCORE ?? 4),
     );
 
-    const runArtifactDir = (process.env.RUN_ARTIFACT_DIR || '').trim();
+    const envPollRaw = (process.env.POLL_MINUTES || '').trim();
+    const cliPollArg = process.argv.find((a) => a.startsWith('--interval-minutes='));
+    const pollOverrideMinutes = cliPollArg
+        ? Number(cliPollArg.split('=')[1])
+        : envPollRaw !== ''
+          ? Number(envPollRaw)
+          : NaN;
+    /** Normal cadence: one tick per primary chart candle (e.g. 15m chart → every 15 min). */
+    const daemonNormalSleepMs =
+        Number.isFinite(pollOverrideMinutes) && pollOverrideMinutes > 0
+            ? pollOverrideMinutes * 60_000
+            : intervalToMilliseconds(interval);
+    const daemonNormalPollSource =
+        Number.isFinite(pollOverrideMinutes) && pollOverrideMinutes > 0
+            ? 'POLL_MINUTES_or_CLI'
+            : `primary_${interval}`;
+    /** High-attention cadence: one tick per lower-timeframe candle (e.g. 15m chart → 5m). */
+    const daemonHighAttentionSleepMs = getDaemonPollMillisecondsFromChart(interval);
 
     if (daemon && once) {
         logError('Cannot use --daemon and --once together', '');
@@ -55,11 +77,19 @@ async function main() {
         interval,
         once,
         daemon,
-        pollMinutes,
         entryThreshold,
         llmMinScore,
         telegramMode,
         runArtifactDir: runArtifactDir || '(stdout only)',
+        ...(daemon
+            ? {
+                  daemonNormalSleepMs,
+                  daemonNormalPollSource,
+                  daemonHighAttentionSleepMs,
+                  highAttentionMinScore,
+                  lowerTimeframe: mapToLowerInterval(interval),
+              }
+            : {}),
     });
 
     async function persistAndNotify(result: Awaited<ReturnType<typeof runEvaluation>>) {
@@ -90,16 +120,23 @@ async function main() {
     }
 
     if (daemon) {
-        logInfo('Daemon mode — dynamic cadence when strategy score is high', {
-            highAttentionMinScore,
-        });
-        const baseMs = pollMinutes * 60 * 1000;
+        logInfo(
+            'Daemon mode — normal = primary timeframe tick; high attention = lower timeframe tick (best score ≥ gate)',
+            {
+                daemonNormalSleepMs,
+                daemonNormalPollSource,
+                daemonHighAttentionSleepMs,
+                highAttentionMinScore,
+            },
+        );
         // eslint-disable-next-line no-constant-condition
         while (true) {
             try {
                 const result = await runOnce();
                 const nextMs =
-                    result.best.score >= highAttentionMinScore ? 60_000 : baseMs;
+                    result.best.score >= highAttentionMinScore
+                        ? daemonHighAttentionSleepMs
+                        : daemonNormalSleepMs;
                 await sleep(nextMs);
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
@@ -108,7 +145,12 @@ async function main() {
                     msg: 'daemon_tick_failed',
                     error: message,
                 });
-                await sleep(60_000);
+                await sleep(
+                    Math.min(
+                        Math.min(daemonNormalSleepMs, daemonHighAttentionSleepMs),
+                        60_000,
+                    ),
+                );
             }
         }
     }

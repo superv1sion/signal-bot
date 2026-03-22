@@ -89,6 +89,7 @@ export function buildProposalFromStrategy(
     state: MarketState,
     signals: SignalBundle,
 ): TradeProposal | null {
+    console.log(best)
     if (best.score <= 0) return null;
 
     if (best.name === 'sfp_reversal' && signals.sfp.valid) {
@@ -113,10 +114,76 @@ export function buildProposalFromStrategy(
         }
     }
 
-    if (best.name === 'add_to_winner' && best.score >= 2) {
-        if (state.trend === 'up') return proposalForLong(state, 'Add-to-winner continuation (bull)');
-        if (state.trend === 'down') return proposalForShort(state, 'Add-to-winner continuation (bear)');
+    if (best.name === 'range_consolidation' && best.score >= 3) {
+        if (best.context === 'range_long') {
+            return proposalForRangeLong(
+                state,
+                `Range consolidation — long near range low (mean reversion)`,
+            );
+        }
+        if (best.context === 'range_short') {
+            return proposalForRangeShort(
+                state,
+                `Range consolidation — short near range high (mean reversion)`,
+            );
+        }
     }
 
     return null;
+}
+
+function proposalForRangeLong(state: MarketState, reason: string): TradeProposal | null {
+    const close = state.latest.close;
+    const atr = state.indicators.atr;
+    const gap = minGapForPrice(close);
+    const { swingHigh, swingLow } = state.swings;
+    if (!Number.isFinite(swingHigh) || !Number.isFinite(swingLow)) return null;
+    const range = swingHigh - swingLow;
+    if (range <= gap * 2) return null;
+
+    const mid = (swingHigh + swingLow) / 2;
+    const stopLoss = Math.max(swingLow - Math.max(atr, gap), gap);
+    const refEntry = close;
+    const t1 = Math.max(mid, close + gap);
+    const t2 = Math.max(swingHigh - gap, t1 + gap);
+    const t3 = Math.max(swingHigh + Math.max(atr, gap) * 0.35, t2 + gap);
+    const takeProfits: [number, number, number] = [t1, t2, t3];
+    const entryZone: [number, number] = [close - atr * 0.12, close + atr * 0.12];
+    const riskReward = rrTriple('long', refEntry, stopLoss, takeProfits);
+    return {
+        direction: 'long',
+        entryZone,
+        stopLoss,
+        takeProfits,
+        riskReward,
+        reason,
+    };
+}
+
+function proposalForRangeShort(state: MarketState, reason: string): TradeProposal | null {
+    const close = state.latest.close;
+    const atr = state.indicators.atr;
+    const gap = minGapForPrice(close);
+    const { swingHigh, swingLow } = state.swings;
+    if (!Number.isFinite(swingHigh) || !Number.isFinite(swingLow)) return null;
+    const range = swingHigh - swingLow;
+    if (range <= gap * 2) return null;
+
+    const mid = (swingHigh + swingLow) / 2;
+    const stopLoss = swingHigh + Math.max(atr, gap);
+    const refEntry = close;
+    const t1 = Math.min(mid, close - gap);
+    const t2 = Math.min(swingLow + gap, t1 - gap);
+    const t3 = Math.min(swingLow - Math.max(atr, gap) * 0.35, t2 - gap);
+    const takeProfits: [number, number, number] = [t1, t2, t3];
+    const entryZone: [number, number] = [close - atr * 0.12, close + atr * 0.12];
+    const riskReward = rrTriple('short', refEntry, stopLoss, takeProfits);
+    return {
+        direction: 'short',
+        entryZone,
+        stopLoss,
+        takeProfits,
+        riskReward,
+        reason,
+    };
 }

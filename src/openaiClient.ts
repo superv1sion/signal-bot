@@ -64,6 +64,8 @@ export async function getLlmCritique(input: {
     market_state: MarketState;
     signals: SignalBundle;
     strategy: StrategyResult;
+    /** Operator macro view (e.g. bull/bear); omitted from payload when empty. */
+    operator_market_environment?: string;
 }): Promise<LlmCritique> {
     if (!OPENAI_API_KEY) {
         throw new Error('Missing OPENAI_API_KEY in environment.');
@@ -78,9 +80,11 @@ export async function getLlmCritique(input: {
 Rules:
 - You must NOT propose trades, direction, entries, stop loss, or take profit levels.
 - You only critique the given strategy candidate using the structured state.
+- If operator_market_environment is present, treat it as the human operator's macro regime view; flag when the candidate clearly fights that view or when alignment is meaningful.
 - Answer: strongest reasons to avoid this trade, trap vs continuation, HTF conflicts, late vs early setup.`;
 
-    const payload = {
+    const note = (input.operator_market_environment || '').trim();
+    const payload: Record<string, unknown> = {
         market_state: compactMarketState(input.market_state),
         signals: input.signals,
         strategy: {
@@ -90,6 +94,7 @@ Rules:
             invalidation: input.strategy.invalidation,
         },
     };
+    if (note) payload.operator_market_environment = note;
 
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         { role: 'system', content: system },
