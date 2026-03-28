@@ -1,6 +1,13 @@
-import { fetchOHLCV, type Candlestick } from '../binanceClient';
+import { fetchOHLCV, fetchOHLCVForwardPages, type Candlestick } from '../binanceClient';
+import {
+    filterDailyProfileCandles,
+    readConsolidationStartFromEnv,
+} from '../features/dailyConsolidation';
+import { intervalToMilliseconds } from '../intervalMs';
 import type { Candle } from '../types/pipeline';
 import type { KlinesParams } from 'binance/lib/types/shared';
+
+export { intervalToMilliseconds };
 
 export function mapToHigherInterval(tf: string): string {
     const trimmed = tf.trim();
@@ -74,23 +81,6 @@ export function mapToLowerInterval(tf: string): string {
     }
 }
 
-/** Binance kline interval string → candle length in ms (for scheduling). */
-export function intervalToMilliseconds(tf: string): number {
-    const s = tf.trim();
-    if (s === '1M') return 30 * 24 * 60 * 60 * 1000;
-    const lower = s.toLowerCase();
-    const m = /^(\d+)(m|h|d|w)$/.exec(lower);
-    if (!m) return 5 * 60 * 1000;
-    const n = Number(m[1]);
-    const u = m[2];
-    const minuteMs = 60_000;
-    if (u === 'm') return n * minuteMs;
-    if (u === 'h') return n * 60 * minuteMs;
-    if (u === 'd') return n * 24 * 60 * minuteMs;
-    if (u === 'w') return n * 7 * 24 * 60 * minuteMs;
-    return 5 * 60 * 1000;
-}
-
 /** One poll per lower-timeframe candle (same LTF mapping as market data). */
 export function getDaemonPollMillisecondsFromChart(primaryInterval: string): number {
     const ltf = mapToLowerInterval(primaryInterval);
@@ -103,7 +93,13 @@ export type MarketBundle = {
     primary: Candlestick[];
     htf: { interval: string; candles: Candlestick[] };
     ltf: { interval: string; candles: Candlestick[] };
+    /** Daily candles for consolidation value area when `CONSOLIDATION_START_DATE` is set. */
+    dailyConsolidation?: { startDate: string; candles: Candlestick[] };
 };
+
+function isTruthyEnv(v: string | undefined): boolean {
+    return /^(1|true|yes)$/i.test((v ?? '').trim());
+}
 
 export async function loadMarketBundle(params: {
     symbol: string;
@@ -119,12 +115,36 @@ export async function loadMarketBundle(params: {
     const htfCandles = await fetchOHLCV({ symbol, interval: htfInterval, limit: htfLimit });
     const ltfInterval = mapToLowerInterval(interval) as KlinesParams['interval'];
     const ltfCandles = await fetchOHLCV({ symbol, interval: ltfInterval, limit: ltfLimit });
+
+    let dailyConsolidation: MarketBundle['dailyConsolidation'];
+    const startParsed = readConsolidationStartFromEnv();
+    if (startParsed.ok) {
+        const endMs = Date.now();
+        const rawDaily = await fetchOHLCVForwardPages({
+            symbol,
+            interval: '1d',
+            startTime: startParsed.startMs,
+            endTime: endMs,
+        });
+        const includeForming = isTruthyEnv(process.env.CONSOLIDATION_INCLUDE_FORMING_DAY);
+        const candles = filterDailyProfileCandles(
+            rawDaily,
+            startParsed.startMs,
+            endMs,
+            includeForming,
+        );
+        if (candles.length > 0) {
+            dailyConsolidation = { startDate: startParsed.isoDate, candles };
+        }
+    }
+
     return {
         symbol,
         primaryInterval: interval,
         primary,
         htf: { interval: mapToHigherInterval(interval), candles: htfCandles },
         ltf: { interval: mapToLowerInterval(interval), candles: ltfCandles },
+        ...(dailyConsolidation ? { dailyConsolidation } : {}),
     };
 }
 

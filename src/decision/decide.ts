@@ -7,18 +7,15 @@ function clamp(n: number, lo: number, hi: number): number {
     return Math.max(lo, Math.min(hi, n));
 }
 
+export type EntryGateMode = 'final' | 'best';
+
 export function decide(input: {
     best: StrategyResult;
     critique: LlmCritique | null;
     entryThreshold: number;
+    /** `final` (default): send if best.score + LLM adjustment ≥ threshold. `best`: ignore adjustment for the gate (veto still applies). */
+    entryGate?: EntryGateMode;
 }): { finalScore: number; send: boolean; vetoed: boolean } {
-    if (input.critique?.veto) {
-        return {
-            finalScore: input.best.score,
-            send: false,
-            vetoed: true,
-        };
-    }
     const rawAdj = input.critique?.score_adjustment ?? 0;
     const adj = clamp(
         Number.isFinite(rawAdj) ? rawAdj : 0,
@@ -26,10 +23,14 @@ export function decide(input: {
         Number.isFinite(ADJ_MAX) ? ADJ_MAX : 1,
     );
     const finalScore = input.best.score + adj;
+
+    if (input.critique?.veto) {
+        return { finalScore, send: false, vetoed: true };
+    }
+
+    const gateScore = input.entryGate === 'best' ? input.best.score : finalScore;
     const send =
-        finalScore >= input.entryThreshold &&
-        input.best.score > 0 &&
-        !input.critique?.veto;
+        gateScore >= input.entryThreshold && input.best.score > 0;
 
     return { finalScore, send, vetoed: false };
 }

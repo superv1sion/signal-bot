@@ -9,6 +9,7 @@ import {
 import type { MarketBundle } from '../data/marketData';
 import { candlestickToCandle } from '../data/marketData';
 import type { MarketState, MarketStructureTag, Trend, VolatilityRegime } from '../types/pipeline';
+import { computeValueAreaFromDailyCandles } from './dailyConsolidation';
 
 function trendFromEma50Series(ema50: number[]): Trend {
     const last = ema50[ema50.length - 1];
@@ -116,6 +117,18 @@ export function buildMarketState(bundle: MarketBundle): MarketState {
 
     const latest = candlestickToCandle(candles[candles.length - 1]!);
 
+    let dailyValueArea: MarketState['dailyValueArea'];
+    const dc = bundle.dailyConsolidation;
+    if (dc?.candles?.length) {
+        const rawPct = Number(process.env.CONSOLIDATION_VALUE_AREA_PCT ?? 70);
+        const valueAreaPct = Number.isFinite(rawPct) ? rawPct : 70;
+        const va = computeValueAreaFromDailyCandles(dc.candles, {
+            valueAreaPct,
+            consolidationStartDate: dc.startDate,
+        });
+        if (va) dailyValueArea = va;
+    }
+
     return {
         symbol: bundle.symbol,
         primaryInterval: bundle.primaryInterval,
@@ -146,5 +159,6 @@ export function buildMarketState(bundle: MarketBundle): MarketState {
         },
         swings: { swingHigh, swingLow, window: swingWindow },
         volatility,
+        ...(dailyValueArea ? { dailyValueArea } : {}),
     };
 }

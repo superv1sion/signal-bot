@@ -13,6 +13,19 @@ export type MarketStructureTag = 'HH' | 'HL' | 'LH' | 'LL' | 'unknown';
 
 export type VolatilityRegime = 'low' | 'mid' | 'high';
 
+/** Approximate daily value area from operator-defined consolidation window (OHLCV profile). */
+export type DailyValueArea = {
+    consolidationStartDate: string;
+    firstBarTime: number;
+    lastBarTime: number;
+    poc: number;
+    vah: number;
+    val: number;
+    valueAreaPct: number;
+    barCount: number;
+    note?: string;
+};
+
 export type MarketState = {
     symbol: string;
     primaryInterval: string;
@@ -37,9 +50,18 @@ export type MarketState = {
     ltf: { interval: string; trend: Trend; ema20?: number; ema50?: number; ema200?: number };
     swings: { swingHigh: number; swingLow: number; window: number };
     volatility: VolatilityRegime;
+    /** Set when `CONSOLIDATION_START_DATE` is valid and daily profile was computed. */
+    dailyValueArea?: DailyValueArea;
 };
 
-export type SfpSignal = { type: 'bullish' | 'bearish'; valid: boolean };
+export type SfpSignal = {
+    type: 'bullish' | 'bearish';
+    valid: boolean;
+    /** Liquidity level swept (prior range high for bearish, prior range low for bullish). */
+    sweptLevel?: number;
+    /** Penetration past the level in ATR units (undefined when ATR is zero). */
+    penetrationAtr?: number;
+};
 
 export type SignalBundle = {
     trendAligned: boolean;
@@ -65,6 +87,12 @@ export type TradeDirection = 'long' | 'short';
 
 export type TradeProposal = {
     direction: TradeDirection;
+    /** Reference price at signal time (signal bar close). */
+    entry: number;
+    /** Same as `stopLoss` — alias for compact JSON / alerts. */
+    sl: number;
+    /** First take-profit (same as `takeProfits[0]`). */
+    tp: number;
     entryZone: [number, number];
     stopLoss: number;
     takeProfits: [number, number, number];
@@ -72,15 +100,25 @@ export type TradeProposal = {
     reason: string;
 };
 
+export type ProposalLevelsMode = 'atr' | 'fixed_pct';
+
 export type DecisionKind = 'signal_sent' | 'skipped' | 'error';
 
 /** Snapshot of what the feature engine produced (for logs / run history). */
 export type MarketSummary = Pick<
     MarketState,
-    'trend' | 'structure' | 'volatility' | 'latest' | 'indicators' | 'htf' | 'ltf' | 'swings'
+    | 'trend'
+    | 'structure'
+    | 'volatility'
+    | 'latest'
+    | 'indicators'
+    | 'htf'
+    | 'ltf'
+    | 'swings'
+    | 'dailyValueArea'
 >;
 
-export type LlmSkippedReason = 'below_min_score' | 'no_api_key';
+export type LlmSkippedReason = 'below_min_score' | 'no_api_key' | 'llm_disabled';
 
 export type DecisionRecord = {
     ts: string;
@@ -105,6 +143,14 @@ export type DecisionRecord = {
     operatorMarketEnvironment?: string;
     /** `LLM_MIN_SCORE` gate value used for this run (for audit). */
     llmMinScoreGate?: number;
+    /** `ENTRY_THRESHOLD` used for this run (for audit). */
+    entryThreshold?: number;
+    /** `ENTRY_GATE_MODE`: whether the send gate used adjusted `finalScore` or raw best strategy score. */
+    entryGateMode?: 'final' | 'best';
+    /** Set when `TARGET_TP_PCT` / `TARGET_SL_PCT` rewrote proposal levels. */
+    levelsMode?: ProposalLevelsMode;
+    targetTpPct?: number;
+    targetSlPct?: number;
     decision: DecisionKind;
     proposal?: TradeProposal;
     skipReason?: string;

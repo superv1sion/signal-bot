@@ -10,9 +10,11 @@ export function sfpStrategy(
     if (signals.sfp.type === 'bullish' && state.trend === 'up') score += 2;
     if (signals.volumeSpike) score += 1;
     const invalidation =
-        signals.sfp.type === 'bearish'
-            ? state.swings.swingHigh
-            : state.swings.swingLow;
+        signals.sfp.valid && signals.sfp.sweptLevel != null
+            ? signals.sfp.sweptLevel
+            : signals.sfp.type === 'bearish'
+              ? state.swings.swingHigh
+              : state.swings.swingLow;
     return {
         name: 'sfp_reversal',
         score,

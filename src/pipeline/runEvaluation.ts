@@ -1,10 +1,5 @@
 import { loadMarketBundle } from '../data/marketData';
-import { buildMarketState } from '../features/buildMarketState';
-import { buildSignals } from '../signals';
-import { runStrategies } from '../strategies/aggregate';
 import { getLlmCritique } from '../openaiClient';
-import { decide } from '../decision/decide';
-import { buildProposalFromStrategy } from '../execution/buildProposal';
 import type {
     DecisionRecord,
     LlmSkippedReason,
@@ -12,25 +7,19 @@ import type {
 } from '../types/pipeline';
 import { logError } from '../logger';
 import { readMarketEnvironmentNote } from '../config/readMarketEnvironment';
+import {
+    buildSkipReason,
+    finalizeWithCritique,
+    parseEntryGateMode,
+    runDeterministicLayer,
+} from './evaluateBundle';
 
 const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || '').trim();
 
 const OPERATOR_ENV_MAX_RECORD_CHARS = 12_000;
 
-function buildSkipReason(params: {
-    signaled: boolean;
-    vetoed: boolean;
-    bestScore: number;
-    finalScore: number;
-    entryThreshold: number;
-    hadProposal: boolean;
-}): string | undefined {
-    if (params.signaled) return undefined;
-    if (params.vetoed) return 'llm_veto';
-    if (params.bestScore <= 0) return 'no_strategy_score';
-    if (params.finalScore < params.entryThreshold) return 'below_entry_threshold';
-    if (!params.hadProposal) return 'no_actionable_proposal';
-    return 'skipped';
+function isTruthyEnv(v: string | undefined): boolean {
+    return /^(1|true|yes)$/i.test((v ?? '').trim());
 }
 
 export async function runEvaluation(params: {
@@ -44,13 +33,12 @@ export async function runEvaluation(params: {
         throw new Error('Not enough candles returned to compute indicators (need >= 60).');
     }
 
-    const state = buildMarketState(bundle);
-    const volumes = bundle.primary.map((c) => c.volume);
-    const signals = buildSignals(state, volumes);
-    const { best, all } = runStrategies(state, signals);
+    const det = runDeterministicLayer(bundle);
 
-    const llmMinScore = Number(process.env.LLM_MIN_SCORE ?? 3);
+    const llmMinScore = Number(process.env.LLM_MIN_SCORE ?? 4.5);
     const entryThreshold = Number(process.env.ENTRY_THRESHOLD ?? 5);
+    const entryGate = parseEntryGateMode();
+    const skipLlm = isTruthyEnv(process.env.SKIP_LLM);
 
     const operatorMarketEnvironmentRaw = readMarketEnvironmentNote();
     const operatorMarketEnvironmentForLlm = operatorMarketEnvironmentRaw.slice(0, 16_000);
@@ -58,12 +46,14 @@ export async function runEvaluation(params: {
     let critique = null;
     let llmSkippedReason: LlmSkippedReason | undefined;
     let llmError: string | undefined;
-    if (best.score >= llmMinScore && OPENAI_API_KEY) {
+    if (skipLlm) {
+        llmSkippedReason = 'llm_disabled';
+    } else if (det.best.score >= llmMinScore && OPENAI_API_KEY) {
         try {
             critique = await getLlmCritique({
-                market_state: state,
-                signals,
-                strategy: best,
+                market_state: det.state,
+                signals: det.signals,
+                strategy: det.best,
                 ...(operatorMarketEnvironmentForLlm
                     ? { operator_market_environment: operatorMarketEnvironmentForLlm }
                     : {}),
@@ -74,56 +64,50 @@ export async function runEvaluation(params: {
             logError('LLM critique failed; proceeding without adjustment', msg);
             critique = null;
         }
-    } else if (best.score < llmMinScore) {
+    } else if (det.best.score < llmMinScore) {
         llmSkippedReason = 'below_min_score';
     } else {
         llmSkippedReason = 'no_api_key';
     }
 
-    let decision = decide({ best, critique, entryThreshold });
-    let proposal = null;
-    if (decision.send) {
-        proposal = buildProposalFromStrategy(best, state, signals);
-        if (!proposal) {
-            decision = { ...decision, send: false };
-        }
-    }
+    const { decision, proposal, proposalLevelsAudit } = finalizeWithCritique(
+        det,
+        critique,
+        entryThreshold,
+        entryGate,
+    );
 
     const signaled = Boolean(decision.send && proposal);
-    const finalScoreForRecord = decision.vetoed ? best.score : decision.finalScore;
+    const finalScoreForRecord = decision.finalScore;
     const skipReason = buildSkipReason({
         signaled,
         vetoed: decision.vetoed,
-        bestScore: best.score,
+        bestScore: det.best.score,
         finalScore: finalScoreForRecord,
         entryThreshold,
         hadProposal: proposal != null,
+        entryGate,
     });
 
     const marketSummary: DecisionRecord['marketSummary'] = {
-        trend: state.trend,
-        structure: state.structure,
-        volatility: state.volatility,
-        latest: state.latest,
-        indicators: state.indicators,
-        htf: state.htf,
-        ltf: state.ltf,
-        swings: state.swings,
+        trend: det.state.trend,
+        structure: det.state.structure,
+        volatility: det.state.volatility,
+        latest: det.state.latest,
+        indicators: det.state.indicators,
+        htf: det.state.htf,
+        ltf: det.state.ltf,
+        swings: det.state.swings,
+        ...(det.state.dailyValueArea ? { dailyValueArea: det.state.dailyValueArea } : {}),
     };
 
     const record: DecisionRecord = {
         ts: new Date().toISOString(),
         symbol,
         interval,
-        strategy: best.name,
-        score: best.score,
-        finalScore: finalScoreForRecord,
-        strategies: all,
-        signals,
+        strategies: det.strategies,
+        signals: det.signals,
         marketSummary,
-        llm: critique,
-        llmSkippedReason:
-            critique != null || llmError ? undefined : llmSkippedReason,
         llmError,
         ...(operatorMarketEnvironmentRaw
             ? {
@@ -134,16 +118,25 @@ export async function runEvaluation(params: {
             }
             : {}),
         llmMinScoreGate: llmMinScore,
+        entryThreshold,
+        entryGateMode: entryGate,
+        ...(proposalLevelsAudit ?? {}),
         decision: signaled ? 'signal_sent' : 'skipped',
         proposal: proposal ?? undefined,
+        strategy: det.best.name,
+        score: det.best.score,
+        finalScore: finalScoreForRecord,
+        llm: critique,
+        llmSkippedReason:
+            critique != null || llmError ? undefined : llmSkippedReason,
         skipReason,
     };
 
     return {
-        state,
-        signals,
-        strategies: all,
-        best,
+        state: det.state,
+        signals: det.signals,
+        strategies: det.strategies,
+        best: det.best,
         critique,
         decision,
         proposal,

@@ -27,10 +27,29 @@ function rrTriple(
     ) as [number, number, number];
 }
 
-function proposalForLong(
-    state: MarketState,
+function finalizeTradeProposal(
+    direction: TradeDirection,
+    entry: number,
+    entryZone: [number, number],
+    stopLoss: number,
+    takeProfits: [number, number, number],
     reason: string,
 ): TradeProposal {
+    const riskReward = rrTriple(direction, entry, stopLoss, takeProfits);
+    return {
+        direction,
+        entry,
+        sl: stopLoss,
+        tp: takeProfits[0]!,
+        entryZone,
+        stopLoss,
+        takeProfits,
+        riskReward,
+        reason,
+    };
+}
+
+function proposalForLong(state: MarketState, reason: string): TradeProposal {
     const close = state.latest.close;
     const atr = state.indicators.atr;
     const gap = minGapForPrice(close);
@@ -45,21 +64,10 @@ function proposalForLong(
     const t3 = Math.max(t2 + Math.max(atr, gap), close + atr * 3);
     const takeProfits: [number, number, number] = [t1, t2, t3];
     const entryZone: [number, number] = [close - atr * 0.1, close + atr * 0.1];
-    const riskReward = rrTriple('long', refEntry, stopLoss, takeProfits);
-    return {
-        direction: 'long',
-        entryZone,
-        stopLoss,
-        takeProfits,
-        riskReward,
-        reason,
-    };
+    return finalizeTradeProposal('long', refEntry, entryZone, stopLoss, takeProfits, reason);
 }
 
-function proposalForShort(
-    state: MarketState,
-    reason: string,
-): TradeProposal {
+function proposalForShort(state: MarketState, reason: string): TradeProposal {
     const close = state.latest.close;
     const atr = state.indicators.atr;
     const gap = minGapForPrice(close);
@@ -73,15 +81,7 @@ function proposalForShort(
     const t3 = Math.min(t2 - Math.max(atr, gap), close - atr * 3);
     const takeProfits: [number, number, number] = [t1, t2, t3];
     const entryZone: [number, number] = [close - atr * 0.1, close + atr * 0.1];
-    const riskReward = rrTriple('short', refEntry, stopLoss, takeProfits);
-    return {
-        direction: 'short',
-        entryZone,
-        stopLoss,
-        takeProfits,
-        riskReward,
-        reason,
-    };
+    return finalizeTradeProposal('short', refEntry, entryZone, stopLoss, takeProfits, reason);
 }
 
 export function buildProposalFromStrategy(
@@ -89,7 +89,6 @@ export function buildProposalFromStrategy(
     state: MarketState,
     signals: SignalBundle,
 ): TradeProposal | null {
-    console.log(best)
     if (best.score <= 0) return null;
 
     if (best.name === 'sfp_reversal' && signals.sfp.valid) {
@@ -149,15 +148,7 @@ function proposalForRangeLong(state: MarketState, reason: string): TradeProposal
     const t3 = Math.max(swingHigh + Math.max(atr, gap) * 0.35, t2 + gap);
     const takeProfits: [number, number, number] = [t1, t2, t3];
     const entryZone: [number, number] = [close - atr * 0.12, close + atr * 0.12];
-    const riskReward = rrTriple('long', refEntry, stopLoss, takeProfits);
-    return {
-        direction: 'long',
-        entryZone,
-        stopLoss,
-        takeProfits,
-        riskReward,
-        reason,
-    };
+    return finalizeTradeProposal('long', refEntry, entryZone, stopLoss, takeProfits, reason);
 }
 
 function proposalForRangeShort(state: MarketState, reason: string): TradeProposal | null {
@@ -177,13 +168,63 @@ function proposalForRangeShort(state: MarketState, reason: string): TradeProposa
     const t3 = Math.min(swingLow - Math.max(atr, gap) * 0.35, t2 - gap);
     const takeProfits: [number, number, number] = [t1, t2, t3];
     const entryZone: [number, number] = [close - atr * 0.12, close + atr * 0.12];
-    const riskReward = rrTriple('short', refEntry, stopLoss, takeProfits);
+    return finalizeTradeProposal('short', refEntry, entryZone, stopLoss, takeProfits, reason);
+}
+
+export function readFixedPctTargetsFromEnv(): { targetTpPct: number; targetSlPct: number } | null {
+    const tpPct = Number(process.env.TARGET_TP_PCT);
+    const slPct = Number(process.env.TARGET_SL_PCT);
+    if (!Number.isFinite(tpPct) || !Number.isFinite(slPct) || tpPct <= 0 || slPct <= 0) {
+        return null;
+    }
+    return { targetTpPct: tpPct, targetSlPct: slPct };
+}
+
+/**
+ * When `TARGET_TP_PCT` and `TARGET_SL_PCT` are set, replace SL/TP from `entry` and scale TP2/TP3.
+ */
+export function applyFixedPctTargetsIfConfigured(proposal: TradeProposal): {
+    proposal: TradeProposal;
+    fixedPct: { targetTpPct: number; targetSlPct: number } | null;
+} {
+    const cfg = readFixedPctTargetsFromEnv();
+    if (!cfg) {
+        return { proposal, fixedPct: null };
+    }
+    const { targetTpPct, targetSlPct } = cfg;
+    const entry = proposal.entry;
+    const direction = proposal.direction;
+    let stopLoss: number;
+    let t1: number;
+    let t2: number;
+    let t3: number;
+    if (direction === 'long') {
+        t1 = entry * (1 + targetTpPct / 100);
+        stopLoss = entry * (1 - targetSlPct / 100);
+        const step = t1 - entry;
+        t2 = entry + 2 * step;
+        t3 = entry + 3 * step;
+    } else {
+        t1 = entry * (1 - targetTpPct / 100);
+        stopLoss = entry * (1 + targetSlPct / 100);
+        const step = entry - t1;
+        t2 = entry - 2 * step;
+        t3 = entry - 3 * step;
+    }
+    const takeProfits: [number, number, number] = [t1, t2, t3];
+    const gap = minGapForPrice(entry);
+    const entryZone: [number, number] = [entry - gap * 0.05, entry + gap * 0.05];
+    const riskReward = rrTriple(direction, entry, stopLoss, takeProfits);
     return {
-        direction: 'short',
-        entryZone,
-        stopLoss,
-        takeProfits,
-        riskReward,
-        reason,
+        proposal: {
+            ...proposal,
+            stopLoss,
+            sl: stopLoss,
+            takeProfits,
+            tp: t1,
+            entryZone,
+            riskReward,
+        },
+        fixedPct: cfg,
     };
 }

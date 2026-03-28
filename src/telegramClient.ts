@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { logError, logInfo } from './logger';
-import type { PipelineResult, TradeProposal } from './types/pipeline';
+import type { PaperTradeOpenRecord } from './persistence/paperTrades';
+import type { LlmCritique, PipelineResult, TradeProposal } from './types/pipeline';
 import { runEvaluation } from './pipeline/runEvaluation';
 
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
@@ -58,6 +59,18 @@ function formatNumber(n: number) {
     return new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 }).format(n);
 }
 
+function formatLlmCritiqueHtml(critique: LlmCritique | null): string {
+    if (critique != null) {
+        return (
+            `🧪 <b>LLM</b>: adj ${critique.score_adjustment} · ${escapeHtml(critique.comment)}` +
+            (critique.risk_flags.length
+                ? `\n⚠️ <b>Risks</b>: ${escapeHtml(critique.risk_flags.join(', '))}`
+                : '')
+        );
+    }
+    return `🧪 <b>LLM</b>: (skipped — below gate or no API key)`;
+}
+
 export function formatPipelineResultAsHtml(input: {
     symbol: string;
     interval: string;
@@ -66,14 +79,8 @@ export function formatPipelineResultAsHtml(input: {
     const { symbol, interval, result } = input;
     const { best, critique, decision, proposal, record } = result;
     const title = `📣 <b>Signal</b> — <b>${escapeHtml(symbol)}</b> (${escapeHtml(interval)})`;
-    const strat = `📊 <b>Strategy</b>: ${escapeHtml(best.name)} · score <b>${best.score}</b> → <b>${decision.vetoed ? best.score : decision.finalScore}</b>`;
-    const llmLine =
-        critique != null
-            ? `🧪 <b>LLM</b>: adj ${critique.score_adjustment} · ${escapeHtml(critique.comment)}` +
-              (critique.risk_flags.length
-                  ? `\n⚠️ <b>Risks</b>: ${escapeHtml(critique.risk_flags.join(', '))}`
-                  : '')
-            : `🧪 <b>LLM</b>: (skipped — below gate or no API key)`;
+    const strat = `📊 <b>Strategy</b>: ${escapeHtml(best.name)} · score <b>${best.score}</b> → <b>${decision.finalScore}</b>`;
+    const llmLine = formatLlmCritiqueHtml(critique);
 
     if (!proposal) {
         return [title, strat, llmLine, `⏸ <b>No trade</b>: ${escapeHtml(record.skipReason || 'n/a')}`].join('\n');
@@ -81,7 +88,14 @@ export function formatPipelineResultAsHtml(input: {
 
     const p: TradeProposal = proposal;
     const dirLabel = p.direction === 'long' ? '🟢 Long' : '🔴 Short';
-    const entryZone = `⚡ Entry: <b>${formatNumber(Math.min(p.entryZone[0], p.entryZone[1]))}</b> – <b>${formatNumber(Math.max(p.entryZone[0], p.entryZone[1]))}</b>`;
+    const levelsNote =
+        record.levelsMode === 'fixed_pct' &&
+        record.targetTpPct !== undefined &&
+        record.targetSlPct !== undefined
+            ? `📐 <b>Levels</b>: fixed <b>${formatNumber(record.targetTpPct)}%</b> TP / <b>${formatNumber(record.targetSlPct)}%</b> SL from entry`
+            : '';
+    const entrySlTp = `💹 <b>entry</b> <b>${formatNumber(p.entry)}</b> · <b>sl</b> <b>${formatNumber(p.sl)}</b> · <b>tp</b> <b>${formatNumber(p.tp)}</b>`;
+    const entryZone = `⚡ Zone: <b>${formatNumber(Math.min(p.entryZone[0], p.entryZone[1]))}</b> – <b>${formatNumber(Math.max(p.entryZone[0], p.entryZone[1]))}</b>`;
     const tps = p.takeProfits
         .map((tp, i) => {
             const rr = p.riskReward[i];
@@ -91,7 +105,19 @@ export function formatPipelineResultAsHtml(input: {
         .join('\n');
     const sl = `🛑 SL: <b>${formatNumber(p.stopLoss)}</b>`;
     const reason = `📝 <b>Reason</b>: ${escapeHtml(p.reason)}`;
-    return [title, strat, llmLine, dirLabel, entryZone, tps, sl, reason].join('\n');
+    const blocks = [
+        title,
+        strat,
+        llmLine,
+        dirLabel,
+        entrySlTp,
+        ...(levelsNote ? [levelsNote] : []),
+        entryZone,
+        tps,
+        sl,
+        reason,
+    ];
+    return blocks.join('\n');
 }
 
 export function formatPipelineSkipSummary(input: {
@@ -115,6 +141,61 @@ export async function postPipelineToTelegram(input: {
     chatIdOverride?: string;
 }): Promise<void> {
     const text = formatPipelineResultAsHtml(input);
+    await sendTelegramMessage({ chatId: input.chatIdOverride, text, parseMode: 'HTML', disableWebPagePreview: true });
+}
+
+function confidenceVsEntryLabel(current: number, entry?: number): string {
+    if (entry === undefined || Number.isNaN(entry)) return 'n/a';
+    if (current > entry) return 'higher';
+    if (current < entry) return 'lower';
+    return 'same';
+}
+
+export function formatOpenLegConfidenceAsHtml(input: {
+    symbol: string;
+    interval: string;
+    result: PipelineResult;
+    openTrade: PaperTradeOpenRecord;
+    previousNotifiedFinalScore: number;
+}): string {
+    const { symbol, interval, result, openTrade, previousNotifiedFinalScore } = input;
+    const cur = result.decision.finalScore;
+    const entryScore = openTrade.finalScore;
+    const vsEntry = confidenceVsEntryLabel(cur, entryScore);
+    const dirLabel = openTrade.direction === 'long' ? 'LONG' : 'SHORT';
+    const deltaPrev =
+        cur > previousNotifiedFinalScore
+            ? 'up'
+            : cur < previousNotifiedFinalScore
+              ? 'down'
+              : 'unchanged';
+    const { best, critique, decision, state } = result;
+    const strat = `📊 <b>Strategy</b>: ${escapeHtml(best.name)} · score <b>${best.score}</b> → <b>${decision.finalScore}</b>`;
+    const openedNote =
+        openTrade.strategy && openTrade.strategy !== best.name
+            ? `📌 <b>Opened with</b>: ${escapeHtml(openTrade.strategy)}`
+            : '';
+    const priceLevels = `💹 <b>close</b> <b>${formatNumber(state.latest.close)}</b> · <b>entry</b> <b>${formatNumber(openTrade.entry)}</b> · <b>sl</b> <b>${formatNumber(openTrade.sl)}</b> · <b>tp</b> <b>${formatNumber(openTrade.tp)}</b>`;
+    return [
+        `📎 <b>Open leg</b> — <b>${escapeHtml(symbol)}</b> (${escapeHtml(interval)}) <b>${dirLabel}</b>`,
+        `📊 Final score <b>${cur}</b> (last alert <b>${previousNotifiedFinalScore}</b> → <b>${deltaPrev}</b>)`,
+        `🎯 vs entry final <b>${entryScore ?? 'n/a'}</b>: <b>${vsEntry}</b> · strategy score <b>${result.best.score}</b>`,
+        strat,
+        ...(openedNote ? [openedNote] : []),
+        formatLlmCritiqueHtml(critique),
+        priceLevels,
+    ].join('\n');
+}
+
+export async function postOpenLegConfidenceToTelegram(input: {
+    symbol: string;
+    interval: string;
+    result: PipelineResult;
+    openTrade: PaperTradeOpenRecord;
+    previousNotifiedFinalScore: number;
+    chatIdOverride?: string;
+}): Promise<void> {
+    const text = formatOpenLegConfidenceAsHtml(input);
     await sendTelegramMessage({ chatId: input.chatIdOverride, text, parseMode: 'HTML', disableWebPagePreview: true });
 }
 

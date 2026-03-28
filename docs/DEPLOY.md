@@ -14,7 +14,8 @@ Telegram (optional):
 
 Pipeline tuning:
 
-- `ENTRY_THRESHOLD` — minimum final score to send a signal (default `5`)
+- `ENTRY_THRESHOLD` — minimum score to send a signal (default `5`; compared to LLM-adjusted score unless `ENTRY_GATE_MODE=best`; see README)
+- `ENTRY_GATE_MODE` — `final` (default) or `best` (gate on raw strategy score; LLM adjustment advisory except `veto`)
 - `LLM_MIN_SCORE` — call LLM critic only when best strategy score is at least this (default `3`)
 - `POLL_MINUTES` — optional; overrides **normal** daemon interval (minutes). If unset, normal cadence = **primary** timeframe (e.g. 15m → 15 min)
 - `HIGH_ATTENTION_MIN_SCORE` — when best strategy score ≥ this, daemon uses **lower timeframe** cadence (e.g. 15m chart → 5 min)

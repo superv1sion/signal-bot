@@ -1,7 +1,13 @@
 import 'dotenv/config';
 import OpenAI from 'openai';
 import { z } from 'zod';
-import type { LlmCritique, MarketState, SignalBundle, StrategyResult } from './types/pipeline';
+import type {
+    DailyValueArea,
+    LlmCritique,
+    MarketState,
+    SignalBundle,
+    StrategyResult,
+} from './types/pipeline';
 
 const CritiqueSchema = z.object({
     risk_flags: z.array(z.string()),
@@ -16,7 +22,7 @@ const OPENAI_MODEL = (process.env.OPENAI_MODEL || 'llama-3.1-70b-versatile').tri
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY, baseURL: OPENAI_BASE_URL });
 
-const ADJ_HARD_MIN = Number(process.env.SCORE_ADJUST_MIN ?? -3);
+const ADJ_HARD_MIN = Number(process.env.SCORE_ADJUST_MIN ?? -2);
 const ADJ_HARD_MAX = Number(process.env.SCORE_ADJUST_MAX ?? 1);
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -46,7 +52,7 @@ function extractFirstJsonObject(text: string): unknown | null {
 }
 
 function compactMarketState(state: MarketState): Record<string, unknown> {
-    return {
+    const base: Record<string, unknown> = {
         symbol: state.symbol,
         primaryInterval: state.primaryInterval,
         latest: state.latest,
@@ -58,6 +64,25 @@ function compactMarketState(state: MarketState): Record<string, unknown> {
         ltf: state.ltf,
         swings: state.swings,
     };
+    if (state.dailyValueArea) {
+        base.daily_value_area = dailyValueAreaPayload(state.dailyValueArea);
+    }
+    return base;
+}
+
+function dailyValueAreaPayload(d: DailyValueArea): Record<string, unknown> {
+    const o: Record<string, unknown> = {
+        consolidation_start_date: d.consolidationStartDate,
+        first_bar_time: d.firstBarTime,
+        last_bar_time: d.lastBarTime,
+        poc: d.poc,
+        vah: d.vah,
+        val: d.val,
+        value_area_pct: d.valueAreaPct,
+        bar_count: d.barCount,
+    };
+    if (d.note) o.note = d.note;
+    return o;
 }
 
 export async function getLlmCritique(input: {
@@ -80,7 +105,7 @@ export async function getLlmCritique(input: {
 Rules:
 - You must NOT propose trades, direction, entries, stop loss, or take profit levels.
 - You only critique the given strategy candidate using the structured state.
-- If operator_market_environment is present, treat it as the human operator's macro regime view; flag when the candidate clearly fights that view or when alignment is meaningful.
+- If operator_market_environment is present, treat it as the human operator's macro regime view; never mention operator_market_environment in the critique.
 - Answer: strongest reasons to avoid this trade, trap vs continuation, HTF conflicts, late vs early setup.`;
 
     const note = (input.operator_market_environment || '').trim();

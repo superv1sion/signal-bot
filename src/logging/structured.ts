@@ -8,13 +8,27 @@ export type StructuredLogEvent = {
     [key: string]: unknown;
 };
 
+type LogFormat = 'human' | 'json' | 'json-pretty';
+
+function logFormat(): LogFormat {
+    const v = (process.env.LOG_FORMAT || '').toLowerCase().trim();
+    if (v === 'json-pretty') return 'json-pretty';
+    if (v === 'json') return 'json';
+    return 'human';
+}
+
+function stringifyForConsole(payload: unknown): string {
+    return logFormat() === 'json-pretty' ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
+}
+
 export function isJsonLogFormat(): boolean {
-    return (process.env.LOG_FORMAT || '').toLowerCase() === 'json';
+    const f = logFormat();
+    return f === 'json' || f === 'json-pretty';
 }
 
 export function logStructured(event: StructuredLogEvent): void {
     if (isJsonLogFormat()) {
-        console.log(JSON.stringify({ ts: new Date().toISOString(), ...event }));
+        console.log(stringifyForConsole({ ts: new Date().toISOString(), ...event }));
         return;
     }
     const { level, msg, ...rest } = event;
@@ -28,7 +42,7 @@ export function logStructured(event: StructuredLogEvent): void {
 
 export function logDecisionRecord(record: DecisionRecord): void {
     if (isJsonLogFormat()) {
-        console.log(JSON.stringify(record));
+        console.log(stringifyForConsole(record));
         return;
     }
     const stratLine =
@@ -59,6 +73,24 @@ export function logDecisionRecord(record: DecisionRecord): void {
     if (m) {
         console.log(
             `[INFO] ${record.ts} market trend=${m.trend} structure=${m.structure} vol=${m.volatility} rsi=${m.indicators.rsi.toFixed(1)} close=${m.latest.close} htf=${m.htf.trend}`,
+        );
+        const dva = m.dailyValueArea;
+        if (dva) {
+            console.log(
+                `[INFO] ${record.ts} dailyVA from=${dva.consolidationStartDate} bars=${dva.barCount} POC=${dva.poc.toFixed(2)} VAH=${dva.vah.toFixed(2)} VAL=${dva.val.toFixed(2)} pct=${dva.valueAreaPct}`,
+            );
+        }
+    }
+    const pr = record.proposal;
+    if (pr) {
+        const pct =
+            record.levelsMode === 'fixed_pct' &&
+            record.targetTpPct !== undefined &&
+            record.targetSlPct !== undefined
+                ? ` fixedPct tp=${record.targetTpPct}% sl=${record.targetSlPct}%`
+                : '';
+        console.log(
+            `[INFO] ${record.ts} proposal ${pr.direction} entry=${pr.entry} sl=${pr.sl} tp=${pr.tp}${pct}`,
         );
     }
 }
