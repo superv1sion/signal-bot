@@ -10,6 +10,7 @@
     "signal": "tsx index.ts",
     "build": "tsc -p tsconfig.json",
     "backtest": "tsx scripts/backtest.ts",
+    "fetch-backtest-data": "tsx scripts/fetchBacktestData.ts",
     "lint": "echo 'no linter configured'"
   },
   "author": "",
