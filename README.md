@@ -43,8 +43,8 @@ chmod +x scripts/run-signal.sh
 | Mode | How to enable | Behavior |
 |------|----------------|----------|
 | **One-shot** | Default, or `--once` | Run pipeline once, log (and optional Telegram / artifacts), exit. |
-| **Daemon** | `--daemon` or `DAEMON=1` | **Normal:** sleep = **primary chart** candle (e.g. `15m` → every **15 minutes**). **High attention:** when best strategy score ≥ `HIGH_ATTENTION_MIN_SCORE` (default 4), sleep = **lower timeframe** candle (e.g. `15m` → **5m**). Override normal cadence only with `POLL_MINUTES` or `--interval-minutes=N`. On tick failure, waits up to 60s before retry. Use **systemd/PM2** for crash restarts — see [docs/DEPLOY.md](docs/DEPLOY.md). |
-| **Telegram listener** | `--telegram` or `TELEGRAM_MODE=1` | Long-polls Telegram; users send `SYMBOL TIMEFRAME` (e.g. `BTCUSDT 15m`) and get one reply per request (signal or “no signal” summary). Requires `TELEGRAM_BOT_TOKEN`. |
+| **Daemon** | `--daemon` or `DAEMON=1` | **Normal:** sleep = **primary chart** candle (e.g. `15m` → every **15 minutes**). **High attention:** when best strategy score ≥ `HIGH_ATTENTION_MIN_SCORE` (default 4), sleep = **lower timeframe** candle (e.g. `15m` → **5m**). Override normal cadence only with `POLL_MINUTES` or `--interval-minutes=N`. On tick failure, waits up to 60s before retry. Use **systemd/PM2** for crash restarts — see [docs/DEPLOY.md](docs/DEPLOY.md). With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_USER_IDS`, a background **getUpdates** loop accepts admin **`/pause`** / **`/unpause`**: paused daemons skip market evaluation until unpaused; **`TELEGRAM_CHAT_ID`** gets a short HTML status when pause state changes. |
+| **Telegram listener** | `--telegram` or `TELEGRAM_MODE=1` | Long-polls Telegram; users send `SYMBOL TIMEFRAME` (e.g. `BTCUSDT 15m`) and get one reply per request (signal or “no signal” summary). Requires `TELEGRAM_BOT_TOKEN`. Same admin **`/pause`** / **`/unpause`** as daemon mode; while paused, on-demand analysis requests get a “bot is paused” reply. |
 
 `--daemon` and `--once` cannot be used together.
 
@@ -92,7 +92,8 @@ chmod +x scripts/run-signal.sh
 | Variable | Description |
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
-| `TELEGRAM_CHAT_ID` | Default chat for **outbound** messages (daemon / one-shot). Listener replies in the chat that messaged the bot. |
+| `TELEGRAM_CHAT_ID` | Default chat for **outbound** messages (daemon / one-shot). Defaults to `@ai_trade_signal_btc_bot` if unset. Listener replies in the chat that messaged the bot. Also used for **pause/unpause announcements** when set. |
+| `TELEGRAM_ADMIN_USER_IDS` | Comma-separated numeric Telegram user ids allowed to run **`/pause`** and **`/unpause`**. If unset, daemon does not start a control poller; listener still accepts the commands but responds that control is not configured unless you set this. Example: `255450214`. |
 
 ### Defaults and tuning
 
@@ -105,7 +106,9 @@ chmod +x scripts/run-signal.sh
 | `LLM_MIN_SCORE` | `3` | Gate: run LLM only if best strategy score ≥ this |
 | `HIGH_ATTENTION_MIN_SCORE` | `4` | Daemon: when best score ≥ this, poll every **lower timeframe** tick instead of every primary candle |
 | `POLL_MINUTES` | _(unset)_ | If set, **normal** daemon interval in minutes; if **unset**, normal interval = primary chart timeframe (e.g. 15m → 15 min) |
-| `RUN_ARTIFACT_DIR` | _(empty)_ | If set, writes per-run JSON + appends `decisions.jsonl`, tracks `paper_trades_open.json` for TP/SL simulation, and **dedupes Telegram**: one full signal per open leg (same symbol/interval/direction); further ticks send short confidence updates only when final score changes |
+| `PAPER_TRADES_FIRESTORE` | _(off)_ | Set to `1` / `true` / `yes` to store **paper trades** (open legs, ticks, closes) in **Firestore** and **dedupe Telegram**: one full signal per open leg; later ticks send confidence updates only when the final score changes |
+| `GOOGLE_APPLICATION_CREDENTIALS` / `FIREBASE_SERVICE_ACCOUNT_PATH` | _(unset)_ | Path to Firebase **service account JSON**; required when `PAPER_TRADES_FIRESTORE` is on |
+| `FIRESTORE_COLLECTION_PREFIX` | _(empty)_ | Optional prefix for collections `paper_trade_open` and `paper_trade_event` |
 | `LOG_FORMAT` | _(human)_ | Set to `json` for one JSON object per line (decisions + fatal errors) |
 | `SKIP_LLM` | _(unset)_ | Set to `1` / `true` / `yes` to skip the OpenAI critic entirely (rules-only `decide`; `llmSkippedReason` = `llm_disabled`) |
 
@@ -121,22 +124,76 @@ Where it appears:
 
 - **Console (default):** several `[INFO]` lines per run — summary, strategies/signals, LLM outcome, compact market line.
 - **`LOG_FORMAT=json`:** one **JSON object per line** with the full record (best for grep, jq, or log shipping).
-- **`RUN_ARTIFACT_DIR`:** same JSON written to a timestamped file under that directory and **appended** to `decisions.jsonl` for a linear history. With Telegram enabled, this directory is also required so the bot knows when a paper leg is still open and avoids repeating full entry alerts (see env table above).
+- **Paper trades / Telegram dedupe:** enable `PAPER_TRADES_FIRESTORE` and a service account path so open legs are tracked in Firestore.
 
 Example:
 
 ```bash
-RUN_ARTIFACT_DIR=./data LOG_FORMAT=json npx tsx index.ts BTCUSDT 5m --once
-tail -1 data/decisions.jsonl | jq .
+LOG_FORMAT=json npx tsx index.ts BTCUSDT 5m --once
 ```
 
 ## Telegram listener
 
-1. Set `TELEGRAM_BOT_TOKEN` (and optionally a default `TELEGRAM_CHAT_ID` for other modes).
+1. Set `TELEGRAM_BOT_TOKEN` (optional: `TELEGRAM_CHAT_ID` to override the default outbound channel `@ai_trade_signal_btc_bot`). For **`/pause`** / **`/unpause`**, set **`TELEGRAM_ADMIN_USER_IDS`** to your numeric user id (comma-separated for several admins).
 2. Start: `npx tsx index.ts --telegram`
 3. In Telegram, send: `BTCUSDT 15m` (symbol + space + timeframe).
 
 You get **one** message back: either a formatted signal card or a short “no signal” explanation.
+
+**Daemon remote control:** run with `--daemon` and the same Telegram env vars. Admins can **`/pause`** to stop scheduled market checks (no `runEvaluation` ticks) and **`/unpause`** to resume. The bot posts a clear **paused** / **unpaused** line to **`TELEGRAM_CHAT_ID`** when the state changes (and confirms in private chat if you issue commands there instead).
+
+## BTC analyst digest (read-only, not a trading signal)
+
+A separate, informational companion to the signal bot above: an hourly BTC context digest (price vs. your configured MAs/anchored VWAP/volume-profile/fib levels, derivatives positioning, on-chain network health, notable headlines) sent to Telegram **and** posted into an open Claude Code session so you can ask follow-up questions right there. It never proposes trades — it reuses this repo's Binance/Telegram plumbing but is otherwise independent of the `decide`/`buildProposal` pipeline above.
+
+### Components
+
+- `config/analyst-ta.json` — your TA parameters (VWAP anchors, tracked MAs, volume-profile range, fib levels, key levels). **Nothing here is auto-detected.** Each moving average has its own `interval` (e.g. `{ "type": "SMA", "period": 50, "interval": "4h" }`) — MAs are fetched and computed independently per timeframe, not forced onto one global chart interval, since a 50 SMA and a 200 EMA are usually watched on different charts. VWAP anchors and the volume-profile range use `primaryInterval`. A `bmsb` block (`{ "enabled": true, "smaPeriod": 20, "emaPeriod": 21, "interval": "1w" }`) tracks the Bull Market Support Band — the standard 20-week SMA / 21-week EMA pair — as a band (`lower`/`upper`); set `enabled: false` to turn it off. Levels come from your own chart reading and change as market conditions change — update this file (directly, or by asking the agent in-session, e.g. "move the VWAP anchor to yesterday's low," "add a fib from 58k to 72k") whenever your view changes. `npm run analyst-snapshot` fails loudly rather than silently substituting a guessed level if a configured anchor/time falls outside the fetched candle history.
+- `npm run analyst-snapshot` — fetches candles + derivatives (funding rate, open interest) + on-chain network-health metrics (mempool.space, free) + news headlines (CryptoPanic, falling back to CoinDesk RSS), computes everything specified in `config/analyst-ta.json`, and writes `./data/analyst-snapshot-latest.json`. Also appends a compact `{price, levels}` entry to `./data/analyst-snapshot-history.jsonl` each run (bounded, `ANALYST_HISTORY_MAX_ENTRIES`, default 500) and uses it to compute `proximityWatch`: % distance from price to every level, support/resistance role, and whether price has moved closer to it since the lookback entry (`ANALYST_PROXIMITY_LOOKBACK_ENTRIES` runs back, default 6 — real elapsed time, not assumed hourly spacing). This feeds the digest's "Trade Setup Watch" section — proximity/reaction info only, never an entry/stop/target trade call.
+- `npm run analyst-send -- "<text>"` — sends a message via the same Telegram bot as the signal pipeline. Set `TELEGRAM_ANALYST_CHAT_ID` in `.env` to route the digest to a separate chat/topic from trade-signal messages (recommended — hourly digests otherwise add ~17 msgs/day to that chat); falls back to `TELEGRAM_CHAT_ID` if unset.
+- `npm run analyst-digest` — the one-shot the launchd agent calls: refresh snapshot → format → LLM bias read → send. `--dry-run` prints without sending; `--no-bias` skips the bias step.
+- **Bias section** (`scripts/analyst/generateBias.ts`) — after the digest is formatted, it is handed to the **locally installed Claude CLI** in headless mode (`claude -p`) along with the last `ANALYST_BIAS_LOOKBACK_ENTRIES` (default 6) history entries, and the model returns a bullish/bearish/neutral call per timeframe plus one overall read. No hosted API key is involved. The model replies with JSON only — all Telegram markup is rendered by `formatDigest.ts`, so model output can never inject HTML into the message. Because the schedule runs 07:11–23:11 local only, the prompt spells out the real timestamps and the largest gap between entries (the overnight break), and the section header shows the true elapsed window (`vs ~13h ago` on the morning run) rather than assuming entries are hourly. **Best-effort:** CLI missing, non-zero exit, timeout, or off-schema JSON all just log to stderr and send the digest without the section. Env: `ANALYST_BIAS_ENABLED` (default true), `ANALYST_BIAS_LOOKBACK_ENTRIES` (6), `ANALYST_BIAS_TIMEOUT_MS` (120000), `ANALYST_BIAS_CLAUDE_MODEL` (optional `--model` passthrough), `ANALYST_BIAS_CLAUDE_BIN` (absolute path to the CLI — **required under launchd**, whose pinned PATH excludes `~/.local/bin`).
+- `.claude/skills/btc-levels/` — an on-demand skill (ask "give me the levels overview" in a Claude Code session in this repo) for a fast, no-interpretation readout of current level values — independent of the hourly schedule.
+
+### How to start the hourly digest
+
+Open a Claude Code session in this repo directory and ask it to schedule the job. The exact prompt in use (recreate verbatim when the 7-day expiry hits):
+
+> Run `npm run analyst-snapshot` in ~/PhpstormProjects/trading-bot (writes ./data/analyst-snapshot-latest.json using the current config/analyst-ta.json — do not modify that config yourself). Read the resulting JSON.
+>
+> Write a digest and post it directly in this chat session, AND send the same text via `npm run analyst-send -- "<digest text>"` so it lands in Telegram. Formatting requirements for the digest text (both copies):
+> - Use Telegram HTML formatting: `<b>Header</b>` for each section title, real newline characters between lines/sections (not literal "\n" text, not a single run-on paragraph).
+> - Use the snapshot's `*Human` date/time fields (generatedAtHuman, anchorTimeHuman, startTimeHuman/endTimeHuman) wherever a date/time is shown — never raw ISO timestamps like "2026-08-22T14:33:22.878Z".
+> - Section headers get a leading emoji (fixed mapping): 💰 Price, 📊 Moving Averages, 🎯 BMSB, 📐 Anchored VWAP, 📉 Volume Profile, 📏 Fib Levels, 🔑 Key Levels, 🧭 Context, 💵 Derivatives, ⛓️ On-chain, 📰 News, 👀 Trade Setup Watch, 🧠 Bias. Format as "<emoji> <b>Header</b>" on its own line.
+> - Price line format: "$77,227.90 (-$57)" — price followed by the change vs the previous run in parentheses (snapshot.price.changeAbs, rounded to the nearest whole dollar, explicit + or - sign). If snapshot.price.previousClose is null (no prior run yet), just show the price, no invented diff.
+> - Sections, in order: Price, Moving Averages, BMSB (only if snapshot.bmsb is non-null), Anchored VWAP, Volume Profile, Fib/Key levels (only if non-empty), Context, Derivatives, On-chain, News (1-2 notable headlines if relevant), Trade Setup Watch, Bias (only when the CLI bias read succeeded).
+> - Within a section, put each distinct fact/level on its OWN line prefixed with "• " (bullet) — never cram multiple facts onto one line with a "·" separator (Context, Derivatives, On-chain each become separate bullet lines, not one packed line).
+> - Moving Averages MUST be sorted by their value (latest price level), highest first — NOT by timeframe/period order. Don't print any note about the sorting.
+> - Color-code every TA level value (Moving Averages, BMSB lower/upper, VWAP, volume-profile POC/VAH/VAL, fib levels, key levels): append 🟢 right after the value if current price (snapshot.price.close) is ABOVE that level, 🔴 if price is BELOW it. Evaluate each value independently — for BMSB this naturally shows 🟢 on lower + 🔴 on upper when price sits inside the band. Do NOT color-code Context or Derivatives/On-chain — those aren't price-comparable levels.
+> - Every moving average line MUST state its interval, e.g. "• SMA50 (4h): 67,556 🟢" — never a bare period with no timeframe.
+> - BMSB line format: "• {lower} 🟢/🔴 – {upper} 🟢/🔴" plus a short bullet noting whether price is above, inside, or below the band.
+> - Every VWAP/volume-profile line MUST state the interval used and note if the underlying config label still says "placeholder" (i.e. not yet a real user-set level).
+> - Keep it factual and data-grounded, no trade opinions.
+>
+> Trade Setup Watch section (uses snapshot.proximityWatch — this is a PROXIMITY WATCH, not a trade signal):
+> - From snapshot.proximityWatch.levels, pick up to 3 levels that are most notable: prioritize any with trend "approaching", then fill remaining slots by smallest abs(distancePercent). If none, one bullet: "no levels currently within notable range."
+> - One bullet per picked level: setup side (📈 LONG at support / 📉 SHORT at resistance), label, value, distancePercent, role (support/resistance), and trend in plain English (real elapsed time via lookbackGeneratedAtHuman vs generatedAtHuman, or "not enough history yet" if trend is "insufficient_history").
+> - Then one short bullet per notable level on what a reaction there would imply directionally, referencing other listed levels for "next support/resistance" — never invented numbers.
+> - No specific entry prices, stop-loss levels, position sizing, or confidence/probability percentages — this is a watch list, not a trade call.
+
+Ask for `recurring: true`, `durable: true`, cron `"11 * * * *"` (hourly, off the top of the hour).
+
+This registers a `CronCreate` job (`recurring: true`, `durable: true`). Because it's a live agent run each time (not a templated script), you can immediately follow up in chat after any digest fires — ask "why," dig into one factor, or ask it to adjust the config.
+
+**Important — this needs an open session to fire:** `CronCreate` jobs only run while a Claude Code session in this repo is open and idle. If you close the session (or your machine is off), the hourly digest simply doesn't fire until you reopen one. This is not a background service.
+
+### How to stop it
+
+Ask the in-session agent to cancel it (it can call `CronDelete` with the job ID returned when the job was created), or just close the session — a durable job with no open session won't fire, but stays registered until explicitly deleted or it expires (see below).
+
+### 7-day lifespan — re-create weekly
+
+`CronCreate` durable recurring jobs **auto-expire after 7 days**: the job fires one final time, then is deleted automatically. There's no "make it permanent" option today. In practice: every ~week, re-ask the agent to schedule it again (same prompt as above). If a week goes by with no digests and no obvious cause, this expiry is the first thing to check.
 
 ## Production deployment
 

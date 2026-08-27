@@ -11,13 +11,19 @@
     "build": "tsc -p tsconfig.json",
     "backtest": "tsx scripts/backtest.ts",
     "fetch-backtest-data": "tsx scripts/fetchBacktestData.ts",
-    "lint": "echo 'no linter configured'"
+    "analyst-snapshot": "tsx scripts/analyst/buildSnapshot.ts",
+    "analyst-send": "tsx scripts/analyst/sendDigest.ts",
+    "analyst-format": "tsx scripts/analyst/formatDigest.ts",
+    "analyst-digest": "tsx scripts/analyst/runDigest.ts",
+    "lint": "echo 'no linter configured'",
+    "test": "tsx --test src/persistence/paperTrades/paperTradeScaling.test.ts scripts/analyst/generateBias.test.ts scripts/analyst/formatDigest.test.ts"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "binance": "2.15.14",
     "dotenv": "^16.4.5",
+    "firebase-admin": "13.7.0",
     "openai": "^4.55.3",
     "zod": "^3.23.8"
   },
