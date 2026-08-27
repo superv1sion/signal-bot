@@ -11,6 +11,16 @@ import { candlestickToCandle } from '../data/marketData';
 import type { MarketState, MarketStructureTag, Trend, VolatilityRegime } from '../types/pipeline';
 import { computeValueAreaFromDailyCandles } from './dailyConsolidation';
 
+function readBollingerConfig(): { period: number; stdDevMultiplier: number } {
+    const rawPeriod = Number(process.env.BB_PERIOD ?? 20);
+    const rawMult = Number(process.env.BB_STD_MULT ?? 2);
+    const period =
+        Number.isFinite(rawPeriod) && rawPeriod >= 2 ? Math.min(500, Math.floor(rawPeriod)) : 20;
+    const stdDevMultiplier =
+        Number.isFinite(rawMult) && rawMult > 0 ? Math.min(4, Math.max(0.5, rawMult)) : 2;
+    return { period, stdDevMultiplier };
+}
+
 function trendFromEma50Series(ema50: number[]): Trend {
     const last = ema50[ema50.length - 1];
     const prev = ema50[ema50.length - 2];
@@ -79,7 +89,12 @@ export function buildMarketState(bundle: MarketBundle): MarketState {
     const ema50 = calculateEMA(closes, 50);
     const ema200 = calculateEMA(closes, 200);
     const macd = calculateMACD(closes);
-    const bollinger = calculateBollingerBands(closes, 20, 2);
+    const bollingerConfig = readBollingerConfig();
+    const bollinger = calculateBollingerBands(
+        closes,
+        bollingerConfig.period,
+        bollingerConfig.stdDevMultiplier,
+    );
     const atr = calculateATR(highs, lows, closes, 14);
     const obv = calculateOBV(closes, volumes);
 
@@ -96,10 +111,14 @@ export function buildMarketState(bundle: MarketBundle): MarketState {
 
     const primaryTrend = trendFromEma50Series(ema50);
 
-    const bbUpperLast = bollinger.upper[bollinger.upper.length - 1] ?? 0;
-    const bbLowerLast = bollinger.lower[bollinger.lower.length - 1] ?? 0;
-    const bbMiddleLast = bollinger.middle[bollinger.middle.length - 1] || 1e-9;
-    const bbWidth = (bbUpperLast - bbLowerLast) / Math.max(bbMiddleLast, 1e-9);
+    const bbLen = bollinger.upper.length;
+    const bbUpperLast = bbLen > 0 ? (bollinger.upper[bbLen - 1] ?? NaN) : NaN;
+    const bbLowerLast = bbLen > 0 ? (bollinger.lower[bbLen - 1] ?? NaN) : NaN;
+    const bbMiddleLast = bbLen > 0 ? (bollinger.middle[bbLen - 1] ?? NaN) : NaN;
+    const bbWidth =
+        bbLen > 0 && Number.isFinite(bbMiddleLast) && Math.abs(bbMiddleLast) > 1e-12
+            ? (bbUpperLast - bbLowerLast) / bbMiddleLast
+            : NaN;
 
     const swingWindow = 10;
     const recent = candles.slice(-swingWindow);
@@ -109,7 +128,10 @@ export function buildMarketState(bundle: MarketBundle): MarketState {
     const lastClose = closes[closes.length - 1] ?? 1;
     const atrLast = atr[atr.length - 1] ?? 0;
     const atrPct = (atrLast / Math.max(lastClose, 1e-9)) * 100;
-    const volatility = classifyVolatility(bbWidth, atrPct);
+    const volatility = classifyVolatility(
+        Number.isFinite(bbWidth) ? bbWidth : 0.04,
+        atrPct,
+    );
     const structure = classifyStructure(highs, lows);
 
     const obvDelta =
@@ -143,10 +165,10 @@ export function buildMarketState(bundle: MarketBundle): MarketState {
             atr: atrLast,
             macdLine: macd.line[macd.line.length - 1] ?? 0,
             macdSignal: macd.signal[macd.signal.length - 1] ?? 0,
-            bbUpper: bbUpperLast,
-            bbMiddle: bbMiddleLast,
-            bbLower: bbLowerLast,
-            bbWidth,
+            bbUpper: Number.isFinite(bbUpperLast) ? bbUpperLast : 0,
+            bbMiddle: Number.isFinite(bbMiddleLast) ? bbMiddleLast : lastClose,
+            bbLower: Number.isFinite(bbLowerLast) ? bbLowerLast : 0,
+            bbWidth: Number.isFinite(bbWidth) ? bbWidth : 0,
             obvDelta,
         },
         htf: { interval: bundle.htf.interval, trend: htfTrend, ema50: ema50Htf },
@@ -158,6 +180,7 @@ export function buildMarketState(bundle: MarketBundle): MarketState {
             ema200: ema200LtfSeries[ema200LtfSeries.length - 1],
         },
         swings: { swingHigh, swingLow, window: swingWindow },
+        bollingerConfig,
         volatility,
         ...(dailyValueArea ? { dailyValueArea } : {}),
     };

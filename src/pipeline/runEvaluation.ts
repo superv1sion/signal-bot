@@ -1,4 +1,4 @@
-import { loadMarketBundle } from '../data/marketData';
+import { candlestickToCandle, loadMarketBundle } from '../data/marketData';
 import { getLlmCritique } from '../openaiClient';
 import type {
     DecisionRecord,
@@ -7,6 +7,7 @@ import type {
 } from '../types/pipeline';
 import { logError } from '../logger';
 import { readMarketEnvironmentNote } from '../config/readMarketEnvironment';
+import { readMinTp1RrFromEnv } from '../execution/buildProposal';
 import {
     buildSkipReason,
     finalizeWithCritique,
@@ -32,6 +33,8 @@ export async function runEvaluation(params: {
     if (bundle.primary.length < 60) {
         throw new Error('Not enough candles returned to compute indicators (need >= 60).');
     }
+
+    const primaryCandles = bundle.primary.map(candlestickToCandle);
 
     const det = runDeterministicLayer(bundle);
 
@@ -70,15 +73,12 @@ export async function runEvaluation(params: {
         llmSkippedReason = 'no_api_key';
     }
 
-    const { decision, proposal, proposalLevelsAudit } = finalizeWithCritique(
-        det,
-        critique,
-        entryThreshold,
-        entryGate,
-    );
+    const { decision, proposal, proposalLevelsAudit, rejectedForLowTp1Rr } =
+        finalizeWithCritique(det, critique, entryThreshold, entryGate);
 
     const signaled = Boolean(decision.send && proposal);
     const finalScoreForRecord = decision.finalScore;
+    const minTp1RrGate = readMinTp1RrFromEnv();
     const skipReason = buildSkipReason({
         signaled,
         vetoed: decision.vetoed,
@@ -87,6 +87,7 @@ export async function runEvaluation(params: {
         entryThreshold,
         hadProposal: proposal != null,
         entryGate,
+        rejectedForLowTp1Rr,
     });
 
     const marketSummary: DecisionRecord['marketSummary'] = {
@@ -98,6 +99,7 @@ export async function runEvaluation(params: {
         htf: det.state.htf,
         ltf: det.state.ltf,
         swings: det.state.swings,
+        bollingerConfig: det.state.bollingerConfig,
         ...(det.state.dailyValueArea ? { dailyValueArea: det.state.dailyValueArea } : {}),
     };
 
@@ -119,6 +121,7 @@ export async function runEvaluation(params: {
             : {}),
         llmMinScoreGate: llmMinScore,
         entryThreshold,
+        ...(minTp1RrGate !== null ? { minTp1RrGate } : {}),
         entryGateMode: entryGate,
         ...(proposalLevelsAudit ?? {}),
         decision: signaled ? 'signal_sent' : 'skipped',
@@ -134,6 +137,7 @@ export async function runEvaluation(params: {
 
     return {
         state: det.state,
+        primaryCandles,
         signals: det.signals,
         strategies: det.strategies,
         best: det.best,

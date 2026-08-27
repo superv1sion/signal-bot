@@ -5,6 +5,8 @@ import { decide, type EntryGateMode } from '../decision/decide';
 import {
     applyFixedPctTargetsIfConfigured,
     buildProposalFromStrategy,
+    proposalMeetsMinTp1Rr,
+    readMinTp1RrFromEnv,
 } from '../execution/buildProposal';
 import type { MarketBundle } from '../data/marketData';
 import type {
@@ -51,10 +53,12 @@ export function finalizeWithCritique(
     decision: { finalScore: number; send: boolean; vetoed: boolean };
     proposal: TradeProposal | null;
     proposalLevelsAudit?: ProposalLevelsAudit;
+    rejectedForLowTp1Rr: boolean;
 } {
     let decision = decide({ best: det.best, critique, entryThreshold, entryGate });
     let proposal: TradeProposal | null = null;
     let proposalLevelsAudit: ProposalLevelsAudit | undefined;
+    let rejectedForLowTp1Rr = false;
     if (decision.send) {
         proposal = buildProposalFromStrategy(det.best, det.state, det.signals);
         if (!proposal) {
@@ -69,9 +73,15 @@ export function finalizeWithCritique(
                     targetSlPct: fixedPct.targetSlPct,
                 };
             }
+            const minTp1Rr = readMinTp1RrFromEnv();
+            if (minTp1Rr !== null && !proposalMeetsMinTp1Rr(proposal, minTp1Rr)) {
+                rejectedForLowTp1Rr = true;
+                proposal = null;
+                decision = { ...decision, send: false };
+            }
         }
     }
-    return { decision, proposal, proposalLevelsAudit };
+    return { decision, proposal, proposalLevelsAudit, rejectedForLowTp1Rr };
 }
 
 /** Rules-only path: no LLM adjustment or veto. */
@@ -81,10 +91,15 @@ export function evaluateDeterministic(
 ): DeterministicLayerResult & {
     decision: { finalScore: number; send: boolean; vetoed: boolean };
     proposal: TradeProposal | null;
+    rejectedForLowTp1Rr: boolean;
 } {
     const det = runDeterministicLayer(bundle);
-    const { decision, proposal } = finalizeWithCritique(det, null, entryThreshold);
-    return { ...det, decision, proposal };
+    const { decision, proposal, rejectedForLowTp1Rr } = finalizeWithCritique(
+        det,
+        null,
+        entryThreshold,
+    );
+    return { ...det, decision, proposal, rejectedForLowTp1Rr };
 }
 
 export function buildSkipReason(params: {
@@ -95,6 +110,7 @@ export function buildSkipReason(params: {
     entryThreshold: number;
     hadProposal: boolean;
     entryGate?: EntryGateMode;
+    rejectedForLowTp1Rr?: boolean;
 }): string | undefined {
     if (params.signaled) return undefined;
     if (params.vetoed) return 'llm_veto';
@@ -102,6 +118,7 @@ export function buildSkipReason(params: {
     const gateScore =
         params.entryGate === 'best' ? params.bestScore : params.finalScore;
     if (gateScore < params.entryThreshold) return 'below_entry_threshold';
+    if (params.rejectedForLowTp1Rr) return 'below_min_rr';
     if (!params.hadProposal) return 'no_actionable_proposal';
     return 'skipped';
 }

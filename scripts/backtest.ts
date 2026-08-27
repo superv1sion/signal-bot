@@ -324,6 +324,7 @@ async function main() {
                 entryThreshold,
                 hadProposal: ev.proposal != null,
                 entryGate: parseEntryGateMode(),
+                rejectedForLowTp1Rr: ev.rejectedForLowTp1Rr,
             });
 
             const row: BarRow = {

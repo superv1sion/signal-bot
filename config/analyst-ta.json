@@ -1,0 +1,32 @@
+{
+  "symbol": "BTCUSDT",
+  "primaryInterval": "1h",
+  "_comment": "All values below are your judgment calls, not auto-detected. Tell the agent in-session to update this file whenever your chart-marked levels change (e.g. 'move the VWAP anchor to yesterday's low', 'add a fib from 58k to 72k').",
+  "vwapAnchors": [
+    {
+      "label": "user anchor (Oct 6 2025)",
+      "anchorTime": "2025-10-06T00:00:00Z"
+    }
+  ],
+  "movingAverages": [
+    { "type": "SMA", "period": 50, "interval": "15m" },
+    { "type": "SMA", "period": 50, "interval": "1h" },
+    { "type": "SMA", "period": 50, "interval": "4h" },
+    { "type": "SMA", "period": 50, "interval": "1w" },
+    { "type": "SMA", "period": 200, "interval": "1d" }
+  ],
+  "bmsb": {
+    "_comment": "Bull Market Support Band (standard definition): 20-week SMA + 21-week EMA, plotted together on the weekly chart.",
+    "enabled": true,
+    "smaPeriod": 20,
+    "emaPeriod": 21,
+    "interval": "1w"
+  },
+  "volumeProfile": {
+    "label": "user range (from Feb 4 2026)",
+    "startTime": "2026-02-04T00:00:00Z",
+    "endTime": null
+  },
+  "fibLevels": [],
+  "keyLevels": []
+}

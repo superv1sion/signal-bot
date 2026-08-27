@@ -49,6 +49,8 @@ export type MarketState = {
     htf: { interval: string; trend: Trend; ema50?: number };
     ltf: { interval: string; trend: Trend; ema20?: number; ema50?: number; ema200?: number };
     swings: { swingHigh: number; swingLow: number; window: number };
+    /** Params used for `indicators.bb*` (and `range_consolidation` range). */
+    bollingerConfig: { period: number; stdDevMultiplier: number };
     volatility: VolatilityRegime;
     /** Set when `CONSOLIDATION_START_DATE` is valid and daily profile was computed. */
     dailyValueArea?: DailyValueArea;
@@ -115,6 +117,7 @@ export type MarketSummary = Pick<
     | 'htf'
     | 'ltf'
     | 'swings'
+    | 'bollingerConfig'
     | 'dailyValueArea'
 >;
 
@@ -145,6 +148,8 @@ export type DecisionRecord = {
     llmMinScoreGate?: number;
     /** `ENTRY_THRESHOLD` used for this run (for audit). */
     entryThreshold?: number;
+    /** `MIN_TP1_RR` gate value when that env is set (audit). */
+    minTp1RrGate?: number;
     /** `ENTRY_GATE_MODE`: whether the send gate used adjusted `finalScore` or raw best strategy score. */
     entryGateMode?: 'final' | 'best';
     /** Set when `TARGET_TP_PCT` / `TARGET_SL_PCT` rewrote proposal levels. */
@@ -159,6 +164,8 @@ export type DecisionRecord = {
 
 export type PipelineResult = {
     state: MarketState;
+    /** Primary-interval candles (oldest → newest), same series as `state.latest`. Used for paper-trade replay. */
+    primaryCandles: Candle[];
     signals: SignalBundle;
     strategies: StrategyResult[];
     best: StrategyResult;

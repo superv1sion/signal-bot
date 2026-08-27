@@ -7,21 +7,26 @@ import {
 import { runEvaluation } from './src/pipeline/runEvaluation';
 import { logInfo, logError } from './src/logger';
 import { logDecisionRecord, logStructured } from './src/logging/structured';
-import { writeRunArtifact, appendDecisionJsonl } from './src/persistence/runArtifact';
+import { getFirebaseAdminApp } from './src/persistence/firebase/adminApp';
 import {
+    paperTradesFirestoreCredentialsConfigured,
+    paperTradesFirestoreEnabled,
+    paperTradesFirestoreReady,
+    paperTradeFirestoreCollectionNames,
     processPaperTradesAfterEvaluation,
     type PaperTradesNotifyPlan,
 } from './src/persistence/paperTrades';
 import { readFixedPctTargetsFromEnv } from './src/execution/buildProposal';
+import { isPaused, sleepDaemonTick } from './src/execution/executionPause';
 import {
+    parseTelegramAdminUserIds,
     postOpenLegConfidenceToTelegram,
+    postPaperTradeClosesToTelegram,
     postPipelineToTelegram,
+    startTelegramControlLoop,
     startTelegramListener,
+    type TradingTargetRef,
 } from './src/telegramClient';
-
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 async function main() {
     const rawArgs = process.argv.slice(2);
@@ -30,6 +35,7 @@ async function main() {
     const timeframeArg = positionalArgs[1];
     const symbol = (symbolArg || process.env.SYMBOL || 'BTCUSDT').toUpperCase();
     const interval = (timeframeArg || process.env.TIMEFRAME || '5m').toLowerCase();
+    const tradingTarget: TradingTargetRef = { symbol, interval };
 
     const hasFlag = (name: string) => process.argv.some((a) => a === name || a.startsWith(`${name}=`));
     const getFlagNumber = (name: string, fallback: number) => {
@@ -82,7 +88,6 @@ async function main() {
         process.exit(2);
     }
 
-    const runArtifactDir = (process.env.RUN_ARTIFACT_DIR || '').trim();
     const fixedPct = readFixedPctTargetsFromEnv();
 
     const highAttentionMinScore = getFlagNumber(
@@ -117,22 +122,50 @@ async function main() {
     const telegramConfigured =
         (process.env.TELEGRAM_BOT_TOKEN || '').trim() !== '' &&
         (process.env.TELEGRAM_CHAT_ID || '').trim() !== '';
-    if (telegramConfigured && !runArtifactDir && !telegramMode) {
+    const paperTradesDedupeActive = paperTradesFirestoreReady();
+    if (paperTradesFirestoreEnabled() && !paperTradesFirestoreCredentialsConfigured()) {
+        logError(
+            'PAPER_TRADES_FIRESTORE is set but FIREBASE_SERVICE_ACCOUNT_PATH / GOOGLE_APPLICATION_CREDENTIALS is missing; paper trades will not run.',
+            '',
+        );
+    }
+    if (telegramConfigured && !paperTradesDedupeActive && !telegramMode) {
         logInfo(
-            'RUN_ARTIFACT_DIR is unset: Telegram will repeat full signals on every tick while conditions hold. Set RUN_ARTIFACT_DIR to enable open-leg dedupe and confidence-only updates.',
+            'Paper trades are not persisted (Firestore off or misconfigured): Telegram still sends signals, but nothing is written to Firestore and open-leg dedupe is off. Set PAPER_TRADES_FIRESTORE=1 and GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_PATH to a service account JSON file for the same Firebase project as your database.',
             '',
         );
     }
 
+    if (paperTradesDedupeActive) {
+        try {
+            const app = getFirebaseAdminApp();
+            const cols = paperTradeFirestoreCollectionNames();
+            logInfo(
+                'Firestore paper trades: Firebase Admin initialized; documents go to Native Firestore (not Realtime Database).',
+                {
+                    firebaseProjectId: app.options.projectId ?? '(missing in app options)',
+                    firestoreOpenCollection: cols.open,
+                    firestoreEventCollection: cols.event,
+                },
+            );
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            logError(
+                'PAPER_TRADES_FIRESTORE is on and a credentials path is set, but Firebase Admin failed to initialize. Paper trades will not be saved until this is fixed.',
+                msg,
+            );
+        }
+    }
+
     logInfo(`Starting signal bot`, {
-        symbol,
-        interval,
+        symbol: tradingTarget.symbol,
+        interval: tradingTarget.interval,
         once,
         daemon,
         entryThreshold,
         llmMinScore,
         telegramMode,
-        runArtifactDir: runArtifactDir || '(stdout only)',
+        paperTradesFirestore: paperTradesDedupeActive ? 'on' : 'off',
         ...(fixedPct
             ? { targetTpPct: fixedPct.targetTpPct, targetSlPct: fixedPct.targetSlPct }
             : {}),
@@ -142,7 +175,7 @@ async function main() {
                 daemonNormalPollSource,
                 daemonHighAttentionSleepMs,
                 highAttentionMinScore,
-                lowerTimeframe: mapToLowerInterval(interval),
+                lowerTimeframe: mapToLowerInterval(tradingTarget.interval),
             }
             : {}),
     });
@@ -150,40 +183,56 @@ async function main() {
     async function persistAndNotify(result: Awaited<ReturnType<typeof runEvaluation>>) {
         logDecisionRecord(result.record);
         let paperNotify: PaperTradesNotifyPlan = { telegram: 'legacy' };
-        if (runArtifactDir) {
+        if (paperTradesFirestoreReady()) {
             try {
-                await writeRunArtifact(runArtifactDir, result.record);
-                await appendDecisionJsonl(runArtifactDir, result.record);
                 paperNotify = await processPaperTradesAfterEvaluation({
-                    baseDir: runArtifactDir,
-                    symbol,
-                    interval,
+                    symbol: tradingTarget.symbol,
+                    interval: tradingTarget.interval,
                     result,
                 });
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e);
-                logError('Failed to write run artifact', msg);
+                logError('Failed to persist paper trades to Firestore', msg);
             }
         }
         if (paperNotify.telegram === 'legacy') {
             if (result.decision.send && result.proposal) {
-                await postPipelineToTelegram({ symbol, interval, result });
+                await postPipelineToTelegram({
+                    symbol: tradingTarget.symbol,
+                    interval: tradingTarget.interval,
+                    result,
+                });
             }
-        } else if (paperNotify.telegram === 'full') {
-            await postPipelineToTelegram({ symbol, interval, result });
-        } else if (paperNotify.telegram === 'confidence') {
-            await postOpenLegConfidenceToTelegram({
-                symbol,
-                interval,
-                result,
-                openTrade: paperNotify.openTrade,
-                previousNotifiedFinalScore: paperNotify.previousNotifiedFinalScore,
-            });
+        } else {
+            if (paperNotify.closures.length > 0) {
+                await postPaperTradeClosesToTelegram({
+                    closures: paperNotify.closures,
+                    closedStats: paperNotify.closedStats,
+                });
+            }
+            if (paperNotify.telegram === 'full') {
+                await postPipelineToTelegram({
+                    symbol: tradingTarget.symbol,
+                    interval: tradingTarget.interval,
+                    result,
+                });
+            } else if (paperNotify.telegram === 'confidence') {
+                await postOpenLegConfidenceToTelegram({
+                    symbol: tradingTarget.symbol,
+                    interval: tradingTarget.interval,
+                    result,
+                    openTrade: paperNotify.openTrade,
+                    previousNotifiedFinalScore: paperNotify.previousNotifiedFinalScore,
+                });
+            }
         }
     }
 
     async function runOnce() {
-        const result = await runEvaluation({ symbol, interval });
+        const result = await runEvaluation({
+            symbol: tradingTarget.symbol,
+            interval: tradingTarget.interval,
+        });
         await persistAndNotify(result);
         return result;
     }
@@ -194,6 +243,10 @@ async function main() {
     }
 
     if (daemon) {
+        const tokenPresent = (process.env.TELEGRAM_BOT_TOKEN || '').trim() !== '';
+        if (tokenPresent && parseTelegramAdminUserIds().length > 0) {
+            startTelegramControlLoop(tradingTarget);
+        }
         logInfo(
             'Daemon mode — normal = primary timeframe tick; high attention = lower timeframe tick (best score ≥ gate)',
             {
@@ -206,12 +259,22 @@ async function main() {
         // eslint-disable-next-line no-constant-condition
         while (true) {
             try {
+                if (isPaused()) {
+                    await sleepDaemonTick(5000);
+                    continue;
+                }
+                const iv = tradingTarget.interval;
+                const tickNormalSleepMs =
+                    Number.isFinite(pollOverrideMinutes) && pollOverrideMinutes > 0
+                        ? pollOverrideMinutes * 60_000
+                        : intervalToMilliseconds(iv);
+                const tickHighAttentionSleepMs = getDaemonPollMillisecondsFromChart(iv);
                 const result = await runOnce();
                 const nextMs =
                     result.best.score >= highAttentionMinScore
-                        ? daemonHighAttentionSleepMs
-                        : daemonNormalSleepMs;
-                await sleep(nextMs);
+                        ? tickHighAttentionSleepMs
+                        : tickNormalSleepMs;
+                await sleepDaemonTick(nextMs);
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
                 logStructured({
@@ -219,11 +282,14 @@ async function main() {
                     msg: 'daemon_tick_failed',
                     error: message,
                 });
-                await sleep(
-                    Math.min(
-                        Math.min(daemonNormalSleepMs, daemonHighAttentionSleepMs),
-                        60_000,
-                    ),
+                const iv = tradingTarget.interval;
+                const tickNormalSleepMs =
+                    Number.isFinite(pollOverrideMinutes) && pollOverrideMinutes > 0
+                        ? pollOverrideMinutes * 60_000
+                        : intervalToMilliseconds(iv);
+                const tickHighAttentionSleepMs = getDaemonPollMillisecondsFromChart(iv);
+                await sleepDaemonTick(
+                    Math.min(Math.min(tickNormalSleepMs, tickHighAttentionSleepMs), 60_000),
                 );
             }
         }

@@ -10,7 +10,8 @@ Required for LLM critique:
 Telegram (optional):
 
 - `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID` (default outbound chat for daemon / one-shot)
+- `TELEGRAM_CHAT_ID` (optional; default outbound chat is `@ai_trade_signal_btc_bot` for daemon / one-shot; receives **paused** / **unpaused** announcements when admins change run state)
+- `TELEGRAM_ADMIN_USER_IDS` (comma-separated numeric user ids) — required for **daemon** remote control: with `TELEGRAM_BOT_TOKEN`, the process long-polls **`/pause`** and **`/unpause`** so scheduled ticks stop or resume without redeploying. Example: `255450214`.
 
 Pipeline tuning:
 
@@ -19,7 +20,9 @@ Pipeline tuning:
 - `LLM_MIN_SCORE` — call LLM critic only when best strategy score is at least this (default `3`)
 - `POLL_MINUTES` — optional; overrides **normal** daemon interval (minutes). If unset, normal cadence = **primary** timeframe (e.g. 15m → 15 min)
 - `HIGH_ATTENTION_MIN_SCORE` — when best strategy score ≥ this, daemon uses **lower timeframe** cadence (e.g. 15m chart → 5 min)
-- `RUN_ARTIFACT_DIR` — if set, writes per-run JSON and appends `decisions.jsonl`
+- `PAPER_TRADES_FIRESTORE` — set to `1` (or `true`) to persist **paper trades** (open legs + tick/close events) in **Firestore**
+- `GOOGLE_APPLICATION_CREDENTIALS` or `FIREBASE_SERVICE_ACCOUNT_PATH` — path to the Firebase **service account JSON** (required when `PAPER_TRADES_FIRESTORE` is on)
+- `FIRESTORE_COLLECTION_PREFIX` — optional string prepended to collection names `paper_trade_open` and `paper_trade_event` (e.g. `prod_` → `prod_paper_trade_open`)
 - `LOG_FORMAT=json` — one JSON object per line for decisions and structured errors
 
 ## One-shot (cron)

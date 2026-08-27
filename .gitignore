@@ -18,6 +18,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Firebase service account (never commit)
+firebase-sa.json
+*-firebase-adminsdk-*.json
+
 # Env files (keep examples)
 .env
 .env.*
@@ -44,9 +48,16 @@ coverage/
 /tmp/
 /temp/
 
+# Generated analyst digest snapshot + price/level history
+/data/analyst-snapshot-latest.json
+/data/analyst-snapshot-history.jsonl
+
 # Local binaries / artifacts in repo root
 /tsx
 /trading-bot@*
 
-# Run artifacts (RUN_ARTIFACT_DIR)
-/data/
+# Backtest score-path artifact (regenerate via the backtest scripts)
+/mfe-score6.json
+
+# Backtest candle fixtures (regenerate via npm run fetch-backtest-data)
+/fixtures/

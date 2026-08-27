@@ -63,6 +63,7 @@ function compactMarketState(state: MarketState): Record<string, unknown> {
         htf: state.htf,
         ltf: state.ltf,
         swings: state.swings,
+        bollingerConfig: state.bollingerConfig,
     };
     if (state.dailyValueArea) {
         base.daily_value_area = dailyValueAreaPayload(state.dailyValueArea);

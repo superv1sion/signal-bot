@@ -55,7 +55,8 @@ function proposalForLong(state: MarketState, reason: string): TradeProposal {
     const gap = minGapForPrice(close);
     const swingLow = state.swings.swingLow;
     let stopLoss = close - Math.max(atr, gap);
-    if (Number.isFinite(swingLow)) stopLoss = Math.min(stopLoss, swingLow - gap);
+    /** Tighten stop: do not place SL further than swingLow (Math.max = higher price = less risk for long). */
+    if (Number.isFinite(swingLow)) stopLoss = Math.max(stopLoss, swingLow - gap);
     stopLoss = Math.max(stopLoss, gap);
 
     const refEntry = close;
@@ -73,7 +74,8 @@ function proposalForShort(state: MarketState, reason: string): TradeProposal {
     const gap = minGapForPrice(close);
     const swingHigh = state.swings.swingHigh;
     let stopLoss = close + Math.max(atr, gap);
-    if (Number.isFinite(swingHigh)) stopLoss = Math.max(stopLoss, swingHigh + gap);
+    /** Tighten stop: do not place SL further than swingHigh (Math.min = lower price = less risk for short). */
+    if (Number.isFinite(swingHigh)) stopLoss = Math.min(stopLoss, swingHigh + gap);
 
     const refEntry = close;
     const t1 = Math.min(close - Math.max(atr, gap), close * 0.999);
@@ -178,6 +180,20 @@ export function readFixedPctTargetsFromEnv(): { targetTpPct: number; targetSlPct
         return null;
     }
     return { targetTpPct: tpPct, targetSlPct: slPct };
+}
+
+/** When set (finite, > 0), proposals must meet this TP1 R:R or are dropped. */
+export function readMinTp1RrFromEnv(): number | null {
+    const raw = (process.env.MIN_TP1_RR ?? '').trim();
+    if (raw === '') return null;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0) return null;
+    return v;
+}
+
+export function proposalMeetsMinTp1Rr(proposal: TradeProposal, min: number): boolean {
+    const tp1Rr = proposal.riskReward[0];
+    return Number.isFinite(tp1Rr) && tp1Rr >= min;
 }
 
 /**

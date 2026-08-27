@@ -25,24 +25,24 @@ function volatilityOkForRange(state: MarketState): boolean {
 }
 
 /**
- * Mean-reversion within a bounded range: score when primary trend is flat,
- * recent high–low is tight vs ATR, and price sits near the bottom (long) or top (short)
- * of that window.
+ * Mean-reversion within the Bollinger envelope: score when primary trend is flat,
+ * band width is tight vs ATR, and price sits in the lower (long) or upper (short) zone
+ * between bbLower and bbUpper (same params as `state.bollingerConfig` / `indicators.bb*`).
  */
 export function consolidationRangeStrategy(
     state: MarketState,
     _signals: SignalBundle,
 ): StrategyResult {
     const close = state.latest.close;
-    const { swingHigh, swingLow } = state.swings;
+    const { bbUpper: rangeHigh, bbLower: rangeLow } = state.indicators;
     const atr = state.indicators.atr;
     const gap = minGapForPrice(close);
 
-    if (!Number.isFinite(swingHigh) || !Number.isFinite(swingLow)) {
+    if (!Number.isFinite(rangeHigh) || !Number.isFinite(rangeLow)) {
         return { name: 'range_consolidation', score: 0, context: 'none' };
     }
 
-    const range = swingHigh - swingLow;
+    const range = rangeHigh - rangeLow;
     if (range <= gap * 2) {
         return { name: 'range_consolidation', score: 0, context: 'none' };
     }
@@ -60,7 +60,7 @@ export function consolidationRangeStrategy(
         return { name: 'range_consolidation', score: 0, context: 'none' };
     }
 
-    const pos = (close - swingLow) / range;
+    const pos = (close - rangeLow) / range;
 
     if (pos <= RANGE_LONG_MAX_POS) {
         let score = 3;
@@ -71,7 +71,7 @@ export function consolidationRangeStrategy(
             name: 'range_consolidation',
             score,
             context: 'range_long',
-            invalidation: swingLow - gap,
+            invalidation: rangeLow - gap,
         };
     }
 
@@ -84,7 +84,7 @@ export function consolidationRangeStrategy(
             name: 'range_consolidation',
             score,
             context: 'range_short',
-            invalidation: swingHigh + gap,
+            invalidation: rangeHigh + gap,
         };
     }
 
